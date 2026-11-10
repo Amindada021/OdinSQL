@@ -17,7 +17,7 @@ import 'ui/query_library.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await appSettings.load();
-  await MssqlRuntime.instance.initialize();
+  await MssqlRuntime.instance.initialize(allowLegacyTlsLogin: appSettings.allowLegacyTlsLogin);
   runApp(const OdinSqlApp());
 }
 
