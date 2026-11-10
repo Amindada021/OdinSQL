@@ -9,6 +9,7 @@ import 'models/server_profile.dart';
 import 'ui/app_settings.dart';
 import 'ui/object_explorer.dart';
 import 'ui/sql_editor.dart';
+import 'ui/result_pane.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -365,18 +366,6 @@ class _SqlHomeState extends State<SqlHome> {
     ]);
   }
 
-  Widget resultTable(MssqlResultSet set) {
-    if (set.columns.isEmpty) return const Text('بدون ستون');
-    return SingleChildScrollView(scrollDirection: Axis.horizontal,
-      child: DataTable(
-        columns: [for (final c in set.columns) DataColumn(label: Text(c.name))],
-        rows: [for (final record in set.rows)
-          DataRow(cells: [for (final c in set.columns)
-            DataCell(ConstrainedBox(constraints: const BoxConstraints(maxWidth: 240),
-              child: Text('${record[c.name] ?? 'NULL'}', maxLines: 3, overflow: TextOverflow.ellipsis)))])],
-      ));
-  }
-
   Widget queries() {
     if (selected == null) return const Center(child: Text('ابتدا سرور را انتخاب کنید.'));
     final visible = tabs.where((t) => t.serverId == selected?.id).toList();
@@ -417,18 +406,8 @@ class _SqlHomeState extends State<SqlHome> {
         Expanded(flex: 2, child: SqlEditor(key: ValueKey(tab.id), controller: tab.editor, undo: tab.undo,
           readOnly: tab.running, suggestions: [for (final t in tables) t.name, for (final t in tables) '${t.schema}.${t.name}'])),
         if (tab.running) const LinearProgressIndicator(),
-        if (tab.error != null) Padding(padding: const EdgeInsets.all(8),
-          child: Text(tab.error!, style: const TextStyle(color: Colors.redAccent))),
-        if (tab.elapsed != null) Text('${tab.elapsed!.inMilliseconds} ms'),
-        if (tab.result != null) Padding(padding: const EdgeInsets.all(6),
-          child: Text('Affected Rows: ${tab.result!.affectedRows}  •  Result Sets: ${tab.result!.resultSets.length}')),
-        Expanded(flex: 3, child: ListView(children: [
-          if (tab.result != null)
-            for (var i = 0; i < tab.result!.resultSets.length; i++) ...[
-              ListTile(title: Text('Result ${i + 1}  •  ${tab.result!.resultSets[i].rows.length} rows')),
-              resultTable(tab.result!.resultSets[i]),
-            ],
-        ])),
+        Expanded(flex: 3, child: ResultPane(key: ValueKey('result/${tab.id}'),
+          result: tab.result, error: tab.error, elapsed: tab.elapsed)),
       ])),
     ]);
   }
