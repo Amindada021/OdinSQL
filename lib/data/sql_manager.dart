@@ -15,6 +15,10 @@ String quoteIdentifier(String name) => '[${name.replaceAll(']', ']]')}]';
 class SqlManager {
   final Map<String, MssqlConnection> _sessions = {};
 
+  bool isConnected(ServerProfile server) => _sessions.entries.any(
+    (entry) => entry.key.startsWith('${server.id}\u0001') && !entry.value.isClosed,
+  );
+
   String _key(ServerProfile server, String database) =>
       '${server.id}\u0001$database';
 
@@ -118,3 +122,4 @@ class SqlManager {
     }
   }
 }
+

@@ -62,6 +62,12 @@ class _SqlHomeState extends State<SqlHome> {
   String? selectedTab;
   int page = 0;
   bool loading = false;
+  String serverSearch = '';
+  bool favoritesOnly = false;
+  int explorerRequest = 0;
+  final Set<String> testing = {};
+  bool busyServer(String id) => tabs.any((t) => t.serverId == id && t.running);
+
   String? error;
 
   @override
@@ -94,7 +100,9 @@ class _SqlHomeState extends State<SqlHome> {
   }
 
   Future<void> connect(ServerProfile p) async {
+    final request = ++explorerRequest;
     setState(() {
+      selectedTab = tabs.where((t) => t.serverId == p.id).lastOrNull?.id;
       selected = p; selectedDb = p.startDatabase; databases = []; tables = [];
       error = null; loading = true; page = 1;
     });
@@ -104,29 +112,30 @@ class _SqlHomeState extends State<SqlHome> {
       final db = names.contains(p.startDatabase) ? p.startDatabase
           : (names.isEmpty ? p.startDatabase : names.first);
       final found = await sql.tables(p, db, pass);
-      if (mounted && selected?.id == p.id) setState(() {
+      if (mounted && request == explorerRequest) setState(() {
         databases = names; selectedDb = db; tables = found;
       });
     } catch (e) {
-      if (mounted) setState(() => error = e.toString());
+      if (mounted && request == explorerRequest) setState(() => error = e.toString());
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted && request == explorerRequest) setState(() => loading = false);
     }
   }
 
   Future<void> useDb(String db) async {
     final p = selected;
     if (p == null) return;
+    final request = ++explorerRequest;
     setState(() { selectedDb = db; loading = true; tables = []; error = null; });
     try {
       final found = await sql.tables(p, db, await password(p));
-      if (mounted && selectedDb == db && selected?.id == p.id) {
+      if (mounted && request == explorerRequest) {
         setState(() => tables = found);
       }
     } catch (e) {
-      if (mounted) setState(() => error = e.toString());
+      if (mounted && request == explorerRequest) setState(() => error = e.toString());
     } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted && request == explorerRequest) setState(() => loading = false);
     }
   }
 
@@ -187,6 +196,7 @@ class _SqlHomeState extends State<SqlHome> {
   }
 
   Future<void> edit([ServerProfile? old]) async {
+    if (old != null && busyServer(old.id)) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
     final value = await showDialog<EditedServer>(context: context,
       builder: (_) => ServerEditor(old));
     if (value == null) return;
@@ -201,6 +211,7 @@ class _SqlHomeState extends State<SqlHome> {
   }
 
   Future<void> remove(ServerProfile p) async {
+    if (busyServer(p.id)) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
     final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
       title: Text('حذف ${p.name}'),
       content: const Text('تنها مشخصات اتصال از گوشی پاک می‌شود؛ دیتابیس حذف نمی‌شود.'),
@@ -210,6 +221,7 @@ class _SqlHomeState extends State<SqlHome> {
       ],
     ));
     if (ok != true) return;
+    ++explorerRequest;
     await sql.closeServer(p);
     await store.remove(p);
     final owned = tabs.where((t) => t.serverId == p.id).toList();
@@ -230,29 +242,96 @@ class _SqlHomeState extends State<SqlHome> {
     );
   }
 
-  Widget servers() => ListView(padding: const EdgeInsets.fromLTRB(16, 20, 16, 100), children: [
-    Text(tr('سرورهای من', 'My servers'), style: Theme.of(context).textTheme.headlineSmall),
-    const SizedBox(height: 12),
-    if (profiles.isEmpty) const Padding(
-      padding: EdgeInsets.all(24),
-      child: Text('هنوز سروری ثبت نشده؛ با دکمه + سرور جدید اضافه کنید.'),
-    ),
-    for (final p in profiles) Card(
-      child: ListTile(
-        leading: avatar(p),
-        title: Text(p.name),
-        subtitle: Text('${p.host}:${p.port}  •  ${p.username}'),
+  Future<void> toggleFavorite(ServerProfile p) async {
+    try { await store.save(p.withFavorite(!p.favorite)); await reload(); }
+    catch (e) { notify(e); }
+  }
+
+  Future<void> testServer(ServerProfile p) async {
+    if (testing.contains(p.id)) return;
+    setState(() => testing.add(p.id));
+    final probe = SqlManager();
+    try {
+      final c = await probe.open(p, p.startDatabase, await password(p));
+      await c.queryRows('SELECT 1 AS connected');
+      notify(tr('اتصال موفق بود: ${p.name}', 'Connection successful: ${p.name}'));
+    } catch (e) { notify(e); }
+    finally {
+      await probe.closeAll();
+      if (mounted) setState(() => testing.remove(p.id));
+    }
+  }
+
+  Future<void> disconnect(ServerProfile p) async {
+    if (busyServer(p.id)) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
+    try {
+      await sql.closeServer(p);
+      if (!mounted) return;
+      setState(() {
+        if (selected?.id == p.id) {
+          ++explorerRequest; selected = null; selectedDb = null; loading = false; page = 0;
+        }
+      });
+    } catch (e) { notify(e); }
+  }
+
+  Widget servers() {
+    final search = serverSearch.toLowerCase();
+    final visible = profiles.where((p) => (!favoritesOnly || p.favorite) &&
+      '${p.name} ${p.host} ${p.username}'.toLowerCase().contains(search)).toList()
+      ..sort((a, b) => a.favorite == b.favorite ? a.name.compareTo(b.name) : (a.favorite ? -1 : 1));
+    final connected = profiles.where(sql.isConnected).length;
+    return ListView(padding: const EdgeInsets.fromLTRB(16, 20, 16, 100), children: [
+      Container(padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(20),
+          gradient: LinearGradient(colors: [Theme.of(context).colorScheme.primaryContainer, Theme.of(context).colorScheme.surface])),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(tr('محیط مدیریت SQL Server', 'SQL Server workspace'), style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 8),
+          Text(tr('${profiles.length} سرور · $connected اتصال فعال', '${profiles.length} servers · $connected connected')),
+        ])),
+      const SizedBox(height: 16),
+      TextField(onChanged: (v) => setState(() => serverSearch = v),
+        decoration: InputDecoration(prefixIcon: const Icon(Icons.search), hintText: tr('جستجوی نام یا آدرس سرور', 'Search servers by name or host'))),
+      Align(alignment: AlignmentDirectional.centerStart, child: FilterChip(
+        avatar: const Icon(Icons.star_outline, size: 18), label: Text(tr('علاقه‌مندی‌ها', 'Favorites')),
+        selected: favoritesOnly, onSelected: (v) => setState(() => favoritesOnly = v))),
+      if (visible.isEmpty) Padding(padding: const EdgeInsets.all(24),
+        child: Text(tr('سروری پیدا نشد. با + سرور جدید اضافه کنید.', 'No servers found. Add a server with +.'))),
+      for (final p in visible) Card(clipBehavior: Clip.antiAlias, child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        leading: avatar(p), title: Text(p.name),
+        subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${p.host}:${p.port} · ${p.username}', textDirection: TextDirection.ltr),
+          const SizedBox(height: 4),
+          Row(children: [
+            Icon(Icons.circle, size: 8, color: sql.isConnected(p) ? Colors.teal : Theme.of(context).colorScheme.outline),
+            const SizedBox(width: 6),
+            Text(testing.contains(p.id) ? tr('در حال تست…', 'Testing…') :
+              sql.isConnected(p) ? tr('متصل', 'Connected') : tr('قطع', 'Disconnected')),
+          ]),
+        ]),
         onTap: () => connect(p),
-        trailing: PopupMenuButton<String>(
-          onSelected: (v) => v == 'edit' ? edit(p) : remove(p),
-          itemBuilder: (_) => const [
-            PopupMenuItem(value: 'edit', child: Text('ویرایش')),
-            PopupMenuItem(value: 'delete', child: Text('حذف')),
-          ],
-        ),
-      ),
-    ),
-  ]);
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(tooltip: tr('علاقه‌مندی', 'Favorite'), onPressed: () => toggleFavorite(p),
+            icon: Icon(p.favorite ? Icons.star_rounded : Icons.star_outline_rounded, color: p.favorite ? Colors.amber : null)),
+          PopupMenuButton<String>(onSelected: (v) {
+            switch (v) {
+              case 'edit': edit(p); break;
+              case 'test': testServer(p); break;
+              case 'disconnect': disconnect(p); break;
+              case 'delete': remove(p); break;
+            }
+          }, itemBuilder: (_) => [
+            PopupMenuItem(value: 'edit', child: Text(tr('ویرایش', 'Edit'))),
+            PopupMenuItem(value: 'test', enabled: !testing.contains(p.id), child: Text(tr('تست اتصال', 'Test connection'))),
+            PopupMenuItem(value: 'disconnect', enabled: sql.isConnected(p), child: Text(tr('قطع اتصال', 'Disconnect'))),
+            PopupMenuItem(value: 'delete', child: Text(tr('حذف', 'Delete'))),
+          ]),
+        ]),
+      )),
+    ]);
+  }
 
   Future<void> showColumns(SqlTable t) async {
     final p = selected, db = selectedDb;
@@ -436,6 +515,30 @@ class _ServerEditorState extends State<ServerEditor> {
   final password = TextEditingController();
   late int colorValue = widget.existing?.colorValue ?? 0xff3867d6;
   late String? picture = widget.existing?.imageBase64;
+  bool testing = false;
+  String? testMessage;
+
+  ServerProfile profile() => ServerProfile(
+    id: widget.existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString(),
+    name: name.text.trim(), host: host.text.trim(), port: int.parse(port.text),
+    username: user.text.trim(), startDatabase: database.text.trim().isEmpty ? 'master' : database.text.trim(),
+    colorValue: colorValue, imageBase64: picture, favorite: widget.existing?.favorite ?? false,
+  );
+
+  Future<void> testConnection() async {
+    if (!form.currentState!.validate() || testing) return;
+    setState(() { testing = true; testMessage = null; });
+    final manager = SqlManager();
+    try {
+      final p = profile();
+      final pass = password.text.isNotEmpty ? password.text : await ServerRepository().passwordFor(p);
+      if (pass == null) throw StateError(tr('رمز عبور را وارد کنید', 'Enter a password'));
+      final c = await manager.open(p, p.startDatabase, pass);
+      await c.queryRows('SELECT 1 AS connected');
+      if (mounted) setState(() => testMessage = tr('اتصال موفق بود', 'Connection successful'));
+    } catch (e) { if (mounted) setState(() => testMessage = e.toString()); }
+    finally { await manager.closeAll(); if (mounted) setState(() => testing = false); }
+  }
 
   @override
   void dispose() {
@@ -479,6 +582,10 @@ class _ServerEditorState extends State<ServerEditor> {
             ? 'رمز عبور را وارد کنید' : null),
         TextFormField(controller: database,
           decoration: const InputDecoration(labelText: 'Initial Database')),
+        if (testing) const LinearProgressIndicator(),
+        if (testMessage != null) Padding(padding: const EdgeInsets.all(8), child: SelectableText(testMessage!)),
+        OutlinedButton.icon(onPressed: testing ? null : testConnection, icon: const Icon(Icons.wifi_tethering),
+          label: Text(tr('تست اتصال', 'Test connection'))),
         const SizedBox(height: 12),
         Wrap(spacing: 10, children: [
           for (final c in const [0xff3867d6, 0xff229d85, 0xffd06a3b,
@@ -494,15 +601,9 @@ class _ServerEditorState extends State<ServerEditor> {
     ))),
     actions: [
       TextButton(onPressed: () => Navigator.pop(context), child: const Text('انصراف')),
-      FilledButton(onPressed: () {
+      FilledButton(onPressed: testing ? null : () {
         if (!form.currentState!.validate()) return;
-        final p = ServerProfile(
-          id: widget.existing?.id ?? DateTime.now().microsecondsSinceEpoch.toString(),
-          name: name.text.trim(), host: host.text.trim(),
-          port: int.parse(port.text), username: user.text.trim(),
-          startDatabase: database.text.trim().isEmpty ? 'master' : database.text.trim(),
-          colorValue: colorValue, imageBase64: picture,
-        );
+        final p = profile();
         Navigator.pop(context, EditedServer(p, password.text.isEmpty ? null : password.text));
       }, child: const Text('ذخیره')),
     ],

@@ -8,6 +8,7 @@ class ServerProfile {
     required this.startDatabase,
     required this.colorValue,
     this.imageBase64,
+    this.favorite = false,
   });
 
   final String id;
@@ -18,6 +19,13 @@ class ServerProfile {
   final String startDatabase;
   final int colorValue;
   final String? imageBase64;
+  final bool favorite;
+
+  ServerProfile withFavorite(bool value) => ServerProfile(
+    id: id, name: name, host: host, port: port, username: username,
+    startDatabase: startDatabase, colorValue: colorValue,
+    imageBase64: imageBase64, favorite: value,
+  );
 
   Map<String, Object?> toJson() => {
         'id': id,
@@ -28,6 +36,7 @@ class ServerProfile {
         'startDatabase': startDatabase,
         'colorValue': colorValue,
         'imageBase64': imageBase64,
+        'favorite': favorite,
       };
 
   factory ServerProfile.fromJson(Map<String, dynamic> json) => ServerProfile(
@@ -39,5 +48,7 @@ class ServerProfile {
         startDatabase: json['startDatabase'] as String? ?? 'master',
         colorValue: (json['colorValue'] as num?)?.toInt() ?? 0xFF3867D6,
         imageBase64: json['imageBase64'] as String?,
+        favorite: json['favorite'] as bool? ?? false,
       );
 }
+
