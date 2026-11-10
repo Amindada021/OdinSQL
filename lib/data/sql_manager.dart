@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:mssql_native/mssql_native.dart';
 import '../ui/app_settings.dart';
 
@@ -19,6 +21,44 @@ class SqlTable {
 String quoteIdentifier(String name) => '[${name.replaceAll(']', ']]')}]';
 
 class SqlManager {
+  /// Diagnose the TCP port from the phone, only after a failed SQL login.
+  /// A reachable TCP socket does not prove that SQL/TDS/TLS will succeed.
+  Future<String> explainConnectionFailure(ServerProfile server, Object failure) async {
+    if (failure is! MssqlConnectionException ||
+        failure.type != MssqlErrorType.connection) {
+      return failure.toString();
+    }
+
+    final endpoint = '${server.host}:${server.port}';
+    Socket? probe;
+    try {
+      probe = await Socket.connect(server.host, server.port,
+          timeout: const Duration(seconds: 5));
+      return tr(
+        'اتصال TCP به $endpoint برقرار می‌شود، اما ورود به SQL Server ناموفق است. '
+        'در SSMS با TCP و همین پورت تست کنید. نسخه SQL Server و تنظیمات TLS/Force Encryption '
+        'را بررسی کنید. راهنمای TLS 1.0 در متن خطای 20002 فقط یک احتمال است.\n\n$failure',
+        'TCP connection to $endpoint succeeds, but the SQL Server login/handshake fails. '
+        'Test SSMS with TCP on exactly this port and inspect SQL Server version, TLS '
+        'and Force Encryption settings. The legacy TLS hint in error 20002 is only '
+        'one possible cause.\n\n$failure',
+      );
+    } catch (networkError) {
+      return tr(
+        'پورت TCP $endpoint از این گوشی قابل دسترس نیست. IP، پورت واقعی SQL Server، '
+        'TCP/IP، فایروال و مسیر شبکه یا VPN را بررسی کنید. '
+        'اتصال SSMS از یک کامپیوتر دیگر لزوماً دسترسی گوشی را ثابت نمی‌کند.\n'
+        'جزئیات: $networkError',
+        'TCP port $endpoint is not reachable from this phone. Verify the IP, '
+        'actual SQL Server TCP port, SQL Server TCP/IP, firewall and phone network/VPN. '
+        'SSMS on a different PC does not prove phone connectivity.\n'
+        'Details: $networkError',
+      );
+    } finally {
+      probe?.destroy();
+    }
+  }
+
   final Map<String, MssqlConnection> _sessions = {};
   final Map<String, Future<MssqlConnection>> _opening = {};
 
