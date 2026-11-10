@@ -8,6 +8,7 @@ import 'data/sql_manager.dart';
 import 'models/server_profile.dart';
 import 'ui/app_settings.dart';
 import 'ui/object_explorer.dart';
+import 'ui/sql_editor.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,9 +38,14 @@ class OdinSqlApp extends StatelessWidget {
 class QueryTab {
   QueryTab(this.serverId, this.database, [String sql = ''])
       : id = DateTime.now().microsecondsSinceEpoch.toString(),
-        editor = TextEditingController(text: sql);
-  final String id, serverId, database;
-  final TextEditingController editor;
+        editor = SqlEditingController(text: sql);
+  final String id, serverId;
+  String database;
+  final SqlEditingController editor;
+  final UndoHistoryController undo = UndoHistoryController();
+  MssqlCancellationToken? cancellation;
+  Duration? elapsed;
+  bool confirming = false;
   MssqlExecutionResult? result;
   String? error;
   bool running = false;
@@ -67,7 +73,7 @@ class _SqlHomeState extends State<SqlHome> {
   bool favoritesOnly = false;
   int explorerRequest = 0;
   final Set<String> testing = {};
-  bool busyServer(String id) => tabs.any((t) => t.serverId == id && t.running);
+  bool busyServer(String id) => tabs.any((t) => t.serverId == id && (t.running || t.confirming));
 
   String? error;
 
@@ -79,7 +85,7 @@ class _SqlHomeState extends State<SqlHome> {
 
   @override
   void dispose() {
-    for (final tab in tabs) { tab.editor.dispose(); }
+    for (final tab in tabs) { tab.cancellation?.cancel(); tab.editor.dispose(); tab.undo.dispose(); }
     unawaited(sql.closeAll());
     super.dispose();
   }
@@ -155,6 +161,8 @@ class _SqlHomeState extends State<SqlHome> {
   }
 
   void closeTab(QueryTab tab) {
+    if (tab.running || tab.confirming) return;
+    unawaited(sql.closeQuerySession(tab.id).catchError((Object e) { notify(e); }));
     setState(() {
       tabs.remove(tab);
       if (selectedTab == tab.id) {
@@ -162,14 +170,18 @@ class _SqlHomeState extends State<SqlHome> {
         selectedTab = related.isEmpty ? null : related.last.id;
       }
     });
-    tab.editor.dispose();
+    tab.editor.dispose(); tab.undo.dispose();
   }
 
   Future<void> run(QueryTab tab) async {
-    if (tab.running || tab.editor.text.trim().isEmpty) return;
+    if (tab.running || tab.confirming || tab.editor.text.trim().isEmpty) return;
     final p = profiles.where((p) => p.id == tab.serverId).firstOrNull;
     if (p == null) return;
-    final statement = tab.editor.text;
+    final selection = tab.editor.selection;
+    final statement = selection.isValid && !selection.isCollapsed
+      ? selection.textInside(tab.editor.text) : tab.editor.text;
+    if (statement.trim().isEmpty) return;
+    tab.confirming = true;
     final dangerous = RegExp(
       r'\b(INSERT|UPDATE|DELETE|MERGE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|'
       r'BACKUP|RESTORE|GRANT|DENY|REVOKE)\b', caseSensitive: false);
@@ -183,21 +195,28 @@ class _SqlHomeState extends State<SqlHome> {
             FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('اجرا')),
           ],
         ));
-      if (ok != true) return;
+      if (ok != true) { tab.confirming = false; return; }
     }
-    setState(() { tab.running = true; tab.error = null; tab.result = null; });
+    tab.confirming = false;
+    if (!mounted || !tabs.contains(tab)) return;
+    final timer = Stopwatch()..start();
+    final token = MssqlCancellationToken();
+    setState(() { tab.running = true; tab.error = null; tab.result = null; tab.elapsed = null; tab.cancellation = token; });
     try {
-      final value = await sql.query(p, tab.database, await password(p), statement);
+      final value = await sql.query(p, tab.database, await password(p), statement, sessionId: tab.id, cancellationToken: token);
       if (mounted && tabs.contains(tab)) setState(() => tab.result = value);
     } catch (e) {
       if (mounted && tabs.contains(tab)) setState(() => tab.error = e.toString());
     } finally {
-      if (mounted && tabs.contains(tab)) setState(() => tab.running = false);
+      timer.stop();
+      if (mounted && tabs.contains(tab)) setState(() {
+        tab.running = false; tab.cancellation = null; tab.elapsed = timer.elapsed;
+      });
     }
   }
 
   Future<void> edit([ServerProfile? old]) async {
-    if (old != null && busyServer(old.id)) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
+    if (old != null && (busyServer(old.id) || tabs.any((t) => t.serverId == old.id && t.confirming))) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
     final value = await showDialog<EditedServer>(context: context,
       builder: (_) => ServerEditor(old));
     if (value == null) return;
@@ -226,7 +245,7 @@ class _SqlHomeState extends State<SqlHome> {
     await sql.closeServer(p);
     await store.remove(p);
     final owned = tabs.where((t) => t.serverId == p.id).toList();
-    for (final t in owned) { tabs.remove(t); t.editor.dispose(); }
+    for (final t in owned) { tabs.remove(t); t.editor.dispose(); t.undo.dispose(); }
     if (selected?.id == p.id) {
       setState(() { selected = null; selectedTab = null; page = 0; });
     }
@@ -368,34 +387,42 @@ class _SqlHomeState extends State<SqlHome> {
           child: InputChip(
             selected: selectedTab == t.id, label: Text(t.database),
             onPressed: () => setState(() => selectedTab = t.id),
-            onDeleted: () => closeTab(t))),
+            onDeleted: t.running || t.confirming ? null : () => closeTab(t))),
         IconButton(icon: const Icon(Icons.add_circle_outline), onPressed: () => newTab()),
       ])),
       if (tab == null) Expanded(child: Center(child:
         FilledButton.icon(onPressed: () => newTab(), icon: const Icon(Icons.add),
           label: const Text('New Query'))))
       else Expanded(child: Column(children: [
-        ListTile(
-          dense: true,
-          title: Text('${selected?.name} / ${tab.database}'),
-          trailing: FilledButton.icon(
-            onPressed: tab.running ? null : () => run(tab),
-            icon: const Icon(Icons.play_arrow), label: const Text('Execute')),
-        ),
-        SizedBox(height: 160, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: TextField(
-            controller: tab.editor, expands: true, minLines: null, maxLines: null,
-            textAlignVertical: TextAlignVertical.top,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
-            decoration: const InputDecoration(border: OutlineInputBorder(),
-              hintText: 'SELECT TOP (100) * FROM dbo.MyTable;'),
-          ))),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Row(children: [
+          Expanded(child: DropdownButton<String>(isExpanded: true, value: tab.database,
+            items: [for (final db in {tab.database, ...databases}) DropdownMenuItem(value: db, child: Text(db, overflow: TextOverflow.ellipsis))],
+            onChanged: tab.running ? null : (db) { if (db != null) setState(() => tab.database = db); })),
+          const SizedBox(width: 8),
+          if (tab.running) IconButton(tooltip: tr('لغو اجرا', 'Cancel query'),
+            onPressed: () => tab.cancellation?.cancel('Cancelled by user'), icon: const Icon(Icons.stop_circle_outlined))
+          else FilledButton.icon(onPressed: () => run(tab), icon: const Icon(Icons.play_arrow), label: Text(tr('اجرا', 'Execute'))),
+        ])),
+        SizedBox(height: 42, child: ListView(scrollDirection: Axis.horizontal, children: [
+          ValueListenableBuilder<UndoHistoryValue>(valueListenable: tab.undo, builder: (context, value, _) => Row(children: [
+            IconButton(tooltip: tr('واگرد', 'Undo'), onPressed: !tab.running && value.canUndo ? tab.undo.undo : null, icon: const Icon(Icons.undo)),
+            IconButton(tooltip: tr('ازنو', 'Redo'), onPressed: !tab.running && value.canRedo ? tab.undo.redo : null, icon: const Icon(Icons.redo)),
+          ])),
+          TextButton.icon(onPressed: tab.running ? null : () {
+            final formatted = formatSql(tab.editor.text);
+            tab.editor.value = TextEditingValue(text: formatted, selection: TextSelection.collapsed(offset: formatted.length));
+          }, icon: const Icon(Icons.format_align_left), label: const Text('Format SQL')),
+          Padding(padding: const EdgeInsets.all(10), child: Text(tr('انتخاب متن = اجرای همان بخش', 'Select text to execute selection'))),
+        ])),
+        Expanded(flex: 2, child: SqlEditor(key: ValueKey(tab.id), controller: tab.editor, undo: tab.undo,
+          readOnly: tab.running, suggestions: [for (final t in tables) t.name, for (final t in tables) '${t.schema}.${t.name}'])),
         if (tab.running) const LinearProgressIndicator(),
         if (tab.error != null) Padding(padding: const EdgeInsets.all(8),
           child: Text(tab.error!, style: const TextStyle(color: Colors.redAccent))),
+        if (tab.elapsed != null) Text('${tab.elapsed!.inMilliseconds} ms'),
         if (tab.result != null) Padding(padding: const EdgeInsets.all(6),
           child: Text('Affected Rows: ${tab.result!.affectedRows}  •  Result Sets: ${tab.result!.resultSets.length}')),
-        Expanded(child: ListView(children: [
+        Expanded(flex: 3, child: ListView(children: [
           if (tab.result != null)
             for (var i = 0; i < tab.result!.resultSets.length; i++) ...[
               ListTile(title: Text('Result ${i + 1}  •  ${tab.result!.resultSets[i].rows.length} rows')),

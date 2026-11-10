@@ -1,4 +1,5 @@
 import 'package:mssql_native/mssql_native.dart';
+import '../ui/app_settings.dart';
 
 import '../models/server_profile.dart';
 
@@ -19,6 +20,7 @@ String quoteIdentifier(String name) => '[${name.replaceAll(']', ']]')}]';
 
 class SqlManager {
   final Map<String, MssqlConnection> _sessions = {};
+  final Map<String, Future<MssqlConnection>> _opening = {};
 
   bool isConnected(ServerProfile server) => _sessions.entries.any(
     (entry) => entry.key.startsWith('${server.id}\u0001') && !entry.value.isClosed,
@@ -30,21 +32,24 @@ class SqlManager {
   Future<MssqlConnection> open(
     ServerProfile server,
     String database,
-    String password,
-  ) async {
-    final key = _key(server, database);
+    String password, {
+    String? sessionId,
+  }) async {
+    final key = '${_key(server, database)}${sessionId == null ? '' : '\u0001$sessionId'}';
     final old = _sessions[key];
     if (old != null && !old.isClosed) return old;
-    final connection = await MssqlConnection.connect(
-      host: server.host,
-      port: server.port,
-      database: database,
-      username: server.username,
-      password: password,
-      applicationName: 'OdinSQL',
+    final pending = _opening[key];
+    if (pending != null) return pending;
+    final future = MssqlConnection.connect(
+      host: server.host, port: server.port, database: database,
+      username: server.username, password: password, applicationName: 'OdinSQL',
     );
-    _sessions[key] = connection;
-    return connection;
+    _opening[key] = future;
+    try {
+      final connection = await future;
+      _sessions[key] = connection;
+      return connection;
+    } finally { _opening.remove(key); }
   }
 
   Future<List<String>> databases(ServerProfile server, String password) async {
@@ -164,19 +169,38 @@ class SqlManager {
     ServerProfile server,
     String database,
     String password,
-    String sql,
-  ) async {
-    final connection = await open(server, database, password);
+    String sql, {
+    required String sessionId,
+    required MssqlCancellationToken cancellationToken,
+  }) async {
+    final connection = await open(server, database, password, sessionId: sessionId);
     // The driver returns every result set, and handles both read and write
     // statements without unsafe SQL verb guessing.
     return connection.query(
       sql,
+      timeout: Duration(seconds: appSettings.timeoutSeconds),
+      cancellationToken: cancellationToken,
+      retry: MssqlRetryPolicy.never,
       maximumRows: 10000,
       maximumBytes: 32 * 1024 * 1024,
     );
   }
 
+  Future<void> closeQuerySession(String sessionId) async {
+    final suffix = '\u0001$sessionId';
+    for (final key in _opening.keys.where((k) => k.endsWith(suffix)).toList()) {
+      try { await _opening[key]; } catch (_) {}
+    }
+    for (final key in _sessions.keys.where((k) => k.endsWith(suffix)).toList()) {
+      final c = _sessions.remove(key);
+      if (c != null && !c.isClosed) await c.close();
+    }
+  }
+
   Future<void> closeServer(ServerProfile server) async {
+    for (final key in _opening.keys.where((k) => k.startsWith('${server.id}\u0001')).toList()) {
+      try { await _opening[key]; } catch (_) {}
+    }
     final keys = _sessions.keys
         .where((key) => key.startsWith('${server.id}\u0001'))
         .toList();
@@ -189,6 +213,9 @@ class SqlManager {
   }
 
   Future<void> closeAll() async {
+    for (final pending in _opening.values.toList()) {
+      try { await pending; } catch (_) {}
+    }
     final sessions = _sessions.values.toList();
     _sessions.clear();
     for (final connection in sessions) {
