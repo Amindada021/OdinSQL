@@ -283,10 +283,9 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
     if (statement.trim().isEmpty) return;
     FocusManager.instance.primaryFocus?.unfocus();
     tab.confirming = true;
-    final dangerous = RegExp(
-      r'\b(INSERT|UPDATE|DELETE|MERGE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|'
-      r'BACKUP|RESTORE|GRANT|DENY|REVOKE|DBCC|KILL|SHUTDOWN|RECONFIGURE)\b', caseSensitive: false);
-    if (dangerous.hasMatch(statement)) {
+    const changing = {'INSERT','UPDATE','DELETE','MERGE','DROP','TRUNCATE','ALTER','CREATE','EXEC','EXECUTE',
+      'BACKUP','RESTORE','GRANT','DENY','REVOKE','DBCC','KILL','SHUTDOWN','RECONFIGURE','INTO','DISABLE','ENABLE'};
+    if (tokenizeSql(statement).any((token) => changing.contains(token.toUpperCase()))) {
       final ok = await showDialog<bool>(context: context,
         builder: (ctx) => AlertDialog(
           title: Text(tr('تأیید اجرای کوئری', 'Confirm execution')),
@@ -302,9 +301,14 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
     if (!mounted || !tabs.contains(tab)) return;
     final timer = Stopwatch()..start();
     final token = MssqlCancellationToken();
+    var success = false;
     setState(() { tab.running = true; tab.error = null; tab.result = null; tab.elapsed = null; tab.cancellation = token; });
     try {
-      final value = await sql.query(p, database, await password(p), statement, sessionId: tab.id, cancellationToken: token);
+      final value = await sql.query(p, database, await password(p), statement, sessionId: tab.id, cancellationToken: token,
+        onDatabaseChanged: (name) {
+          if (mounted && tabs.contains(tab)) { setState(() => tab.database = name); schedulePersist(); }
+        });
+      success = true;
       if (mounted && tabs.contains(tab)) setState(() => tab.result = value);
     } catch (e) {
       if (mounted && tabs.contains(tab)) setState(() => tab.error = e.toString());
@@ -316,7 +320,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       try {
         await queryStore.add({'id': DateTime.now().microsecondsSinceEpoch.toString(),
           'serverId': p.id, 'database': database, 'sql': statement, 'title': statement.trim().split('\n').first,
-          'at': DateTime.now().toIso8601String(), 'elapsedMs': timer.elapsedMilliseconds, 'success': tab.error == null}, saved: false);
+          'at': DateTime.now().toIso8601String(), 'elapsedMs': timer.elapsedMilliseconds, 'success': success}, saved: false);
       } catch (e) { notify(e); }
     }
   }
@@ -405,7 +409,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       notify(tr('اتصال موفق بود: ${p.name}', 'Connection successful: ${p.name}'));
     } catch (e) { notify(e); }
     finally {
-      await probe.closeAll();
+      try { await probe.closeAll(); } catch (e) { notify(e); }
       if (mounted) setState(() => testing.remove(p.id));
     }
   }
@@ -637,7 +641,10 @@ class _ServerEditorState extends State<ServerEditor> {
       await c.queryRows('SELECT 1 AS connected');
       if (mounted) setState(() => testMessage = tr('اتصال موفق بود', 'Connection successful'));
     } catch (e) { if (mounted) setState(() => testMessage = e.toString()); }
-    finally { await manager.closeAll(); if (mounted) setState(() => testing = false); }
+    finally {
+      try { await manager.closeAll(); } catch (e) { if (mounted) setState(() => testMessage = e.toString()); }
+      if (mounted) setState(() => testing = false);
+    }
   }
 
   @override

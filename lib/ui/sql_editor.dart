@@ -14,26 +14,61 @@ const sqlKeywords = <String>{
   'TRANSACTION','COMMIT','ROLLBACK','BACKUP','RESTORE','GRANT','DENY','REVOKE',
 };
 
-// Keep literals, quoted identifiers and comments intact during highlighting and formatting.
-final sqlTokens = RegExp(
-  r'''--[^\r\n]*|/\*(?:[^*]|\*(?!/))*\*/|N?'(?:''|[^'])*'|\[(?:\]\]|[^\]])*\]|\"(?:\"\"|[^\"])*\"|\b\d+(?:\.\d+)?\b|@@?\w+|\b[A-Za-z_][A-Za-z_0-9]*\b|\s+|.''',
-  multiLine: true, dotAll: true,
-);
+// SQL Server supports nested block comments and doubled quote/bracket escapes.
+// Never reflow or change the contents of these tokens.
+Iterable<String> tokenizeSql(String source) sync* {
+  var i = 0;
+  bool word(String c) {
+    final n = c.codeUnitAt(0);
+    return n >= 48 && n <= 57 || n >= 65 && n <= 90 || n >= 97 && n <= 122 || c == '_' || c == '#' || c == r'$';
+  }
+  while (i < source.length) {
+    final start = i;
+    if (source.startsWith('--', i)) {
+      i += 2;
+      while (i < source.length && source[i] != '\n' && source[i] != '\r') { i++; }
+    } else if (source.startsWith('/*', i)) {
+      i += 2;
+      var depth = 1;
+      while (i < source.length && depth > 0) {
+        if (source.startsWith('/*', i)) { depth++; i += 2; }
+        else if (source.startsWith('*/', i)) { depth--; i += 2; }
+        else { i++; }
+      }
+    } else if (source[i] == "'" || source[i] == '[' || source[i] == '"' ||
+        ((source[i] == 'N' || source[i] == 'n') && i + 1 < source.length && source[i + 1] == "'")) {
+      if ((source[i] == 'N' || source[i] == 'n') && source[i + 1] == "'") i++;
+      final close = source[i] == '[' ? ']' : source[i];
+      i++;
+      while (i < source.length) {
+        if (source[i] == close) {
+          i++;
+          if (i < source.length && source[i] == close) { i++; }
+          else { break; }
+        } else { i++; }
+      }
+    } else if (source[i].trim().isEmpty) {
+      do { i++; } while (i < source.length && source[i].trim().isEmpty);
+    } else if (word(source[i]) || source[i] == '@') {
+      do { i++; } while (i < source.length && (word(source[i]) || source[i] == '@'));
+    } else { i++; }
+    yield source.substring(start, i);
+  }
+}
 
 String formatSql(String input) {
-  final matches = sqlTokens.allMatches(input).toList();
+  final matches = tokenizeSql(input).toList();
   final out = StringBuffer();
   var depth = 0;
   for (var i = 0; i < matches.length; i++) {
-    final token = matches[i].group(0)!;
-    final upper = token.toUpperCase();
+    final token = matches[i];
     if (token == '(') depth++;
     if (token == ')') depth = math.max(0, depth - 1);
     if (token.trim().isEmpty && depth == 0 && i + 1 < matches.length &&
-        const {'FROM','WHERE','GROUP','ORDER','HAVING','UNION','SET','VALUES'}.contains(matches[i + 1].group(0)!.toUpperCase())) {
+        const {'FROM','WHERE','GROUP','ORDER','HAVING','UNION','SET','VALUES'}.contains(matches[i + 1].toUpperCase())) {
       out.write('\n');
     } else {
-      out.write(sqlKeywords.contains(upper) ? upper : token);
+      out.write(token);
     }
   }
   return out.toString();
@@ -47,12 +82,12 @@ class SqlEditingController extends TextEditingController {
       return super.buildTextSpan(context: context, style: style, withComposing: withComposing);
     }
     final dark = Theme.of(context).brightness == Brightness.dark;
-    return TextSpan(style: style, children: [for (final match in sqlTokens.allMatches(text))
-      TextSpan(text: match.group(0), style: TextStyle(color: colorFor(match.group(0)!, dark))) ]);
+    return TextSpan(style: style, children: [for (final token in tokenizeSql(text))
+      TextSpan(text: token, style: TextStyle(color: colorFor(token, dark))) ]);
   }
   Color? colorFor(String token, bool dark) {
     if (token.startsWith('--') || token.startsWith('/*')) return dark ? const Color(0xff7fa77c) : const Color(0xff4c7649);
-    if (token.startsWith("'") || token.startsWith("N'")) return dark ? const Color(0xffe6ad8e) : const Color(0xff9b492e);
+    if (token.startsWith("'") || token.startsWith("N'") || token.startsWith("n'")) return dark ? const Color(0xffe6ad8e) : const Color(0xff9b492e);
     if (token.startsWith('@')) return dark ? const Color(0xffcaa8ee) : const Color(0xff7948a5);
     if (sqlKeywords.contains(token.toUpperCase())) return dark ? const Color(0xff87b5ff) : const Color(0xff2459b0);
     if (RegExp(r'^\d').hasMatch(token)) return dark ? const Color(0xffa6d5aa) : const Color(0xff347342);

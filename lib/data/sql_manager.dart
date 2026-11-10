@@ -35,7 +35,7 @@ class SqlManager {
     String password, {
     String? sessionId,
   }) async {
-    final key = '${_key(server, database)}${sessionId == null ? '' : '\u0001$sessionId'}';
+    final key = sessionId == null ? _key(server, database) : '${server.id}\u0001query\u0001$sessionId';
     final old = _sessions[key];
     if (old != null && !old.isClosed) return old;
     final pending = _opening[key];
@@ -184,18 +184,28 @@ class SqlManager {
     String sql, {
     required String sessionId,
     required MssqlCancellationToken cancellationToken,
+    required void Function(String) onDatabaseChanged,
   }) async {
     final connection = await open(server, database, password, sessionId: sessionId);
-    // The driver returns every result set, and handles both read and write
-    // statements without unsafe SQL verb guessing.
-    return connection.query(
-      sql,
-      timeout: Duration(seconds: appSettings.timeoutSeconds),
-      cancellationToken: cancellationToken,
-      retry: MssqlRetryPolicy.never,
-      maximumRows: 10000,
-      maximumBytes: 32 * 1024 * 1024,
-    );
+    // Keep the dropdown authoritative, including after raw USE statements or errors.
+    // One persistent session per tab also preserves temp tables and explicit transactions.
+    await connection.useDatabase(quoteIdentifier(database), cancellationToken: cancellationToken);
+    try {
+      return await connection.query(
+        sql, timeout: Duration(seconds: appSettings.timeoutSeconds),
+        cancellationToken: cancellationToken, retry: MssqlRetryPolicy.never,
+        maximumRows: 10000, maximumBytes: 32 * 1024 * 1024,
+      );
+    } finally {
+      if (!connection.isClosed) {
+        try {
+          final actual = await connection.queryScalar<String>('SELECT DB_NAME()', timeout: const Duration(seconds: 5));
+          if (actual != null) onDatabaseChanged(actual);
+        } catch (_) {
+          // Preserve the original outcome. The next run explicitly selects its database.
+        }
+      }
+    }
   }
 
   Future<void> closeQuerySession(String sessionId) async {
