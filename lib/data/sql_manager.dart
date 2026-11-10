@@ -200,7 +200,7 @@ class SqlManager {
       if (!connection.isClosed) {
         try {
           final actual = await connection.queryScalar<String>('SELECT DB_NAME()', timeout: const Duration(seconds: 5));
-          if (actual != null) onDatabaseChanged(actual);
+          onDatabaseChanged(actual);
         } catch (_) {
           // Preserve the original outcome. The next run explicitly selects its database.
         }
