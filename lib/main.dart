@@ -10,6 +10,8 @@ import 'ui/app_settings.dart';
 import 'ui/object_explorer.dart';
 import 'ui/sql_editor.dart';
 import 'ui/result_pane.dart';
+import 'data/query_repository.dart';
+import 'ui/query_library.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,8 +39,8 @@ class OdinSqlApp extends StatelessWidget {
 }
 
 class QueryTab {
-  QueryTab(this.serverId, this.database, [String sql = ''])
-      : id = DateTime.now().microsecondsSinceEpoch.toString(),
+  QueryTab(this.serverId, this.database, {String sql = '', String? restoredId})
+      : id = restoredId ?? DateTime.now().microsecondsSinceEpoch.toString(),
         editor = SqlEditingController(text: sql);
   final String id, serverId;
   String database;
@@ -58,8 +60,11 @@ class SqlHome extends StatefulWidget {
   State<SqlHome> createState() => _SqlHomeState();
 }
 
-class _SqlHomeState extends State<SqlHome> {
+class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
   final store = ServerRepository();
+  final queryStore = QueryRepository();
+  Timer? persistTimer;
+  bool booting = true;
   final sql = SqlManager();
   final List<QueryTab> tabs = [];
   List<ServerProfile> profiles = [];
@@ -81,14 +86,97 @@ class _SqlHomeState extends State<SqlHome> {
   @override
   void initState() {
     super.initState();
-    reload();
+    WidgetsBinding.instance.addObserver(this);
+    appSettings.addListener(settingsChanged);
+    restoreWorkspace();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    appSettings.removeListener(settingsChanged);
+    persistTimer?.cancel();
+    persistWorkspace();
     for (final tab in tabs) { tab.cancellation?.cancel(); tab.editor.dispose(); tab.undo.dispose(); }
     unawaited(sql.closeAll());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) { persistTimer?.cancel(); persistWorkspace(); }
+  }
+
+  void settingsChanged() { if (mounted) setState(() {}); }
+
+  void schedulePersist() {
+    persistTimer?.cancel();
+    persistTimer = Timer(const Duration(milliseconds: 500), persistWorkspace);
+  }
+
+  void persistWorkspace() {
+    if (booting) return;
+    unawaited(queryStore.saveWorkspace({
+      'selectedTab': selectedTab, 'selectedServer': selected?.id,
+      'tabs': [for (final t in tabs) {'id': t.id, 'serverId': t.serverId, 'database': t.database, 'sql': t.editor.text}],
+    }).catchError((Object e) { notify(tr('ذخیره تب‌ها ناموفق بود: $e', 'Could not save tabs: $e')); }));
+  }
+
+  Future<void> restoreWorkspace() async {
+    try {
+      final items = await store.list();
+      final value = await queryStore.workspace();
+      if (!mounted) return;
+      final restored = <QueryTab>[];
+      for (final raw in (value['tabs'] as List? ?? [])) {
+        final entry = raw as Map<String, dynamic>;
+        if (!items.any((p) => p.id == entry['serverId'])) continue;
+        final tab = QueryTab(entry['serverId'] as String, entry['database'] as String,
+          sql: entry['sql'] as String? ?? '', restoredId: entry['id'] as String?);
+        tab.editor.addListener(schedulePersist); restored.add(tab);
+      }
+      setState(() {
+        profiles = items; tabs.addAll(restored);
+        selectedTab = value['selectedTab'] as String?;
+        selected = items.where((p) => p.id == value['selectedServer']).firstOrNull;
+        selectedDb = currentTab?.database ?? selected?.startDatabase;
+        if (currentTab != null) page = 2;
+      });
+    } catch (e) { notify(e); await reload(); }
+    finally { if (mounted) setState(() => booting = false); }
+  }
+
+  Future<void> saveQuery(QueryTab tab) async {
+    if (tab.editor.text.trim().isEmpty) return;
+    final title = TextEditingController(text: '${tab.database} query');
+    final name = await showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+      title: Text(tr('ذخیره کوئری', 'Save query')),
+      content: TextField(controller: title, autofocus: true, decoration: InputDecoration(labelText: tr('عنوان', 'Title'))),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(tr('انصراف', 'Cancel'))),
+        FilledButton(onPressed: () { if (title.text.trim().isNotEmpty) Navigator.pop(ctx, title.text.trim()); }, child: Text(tr('ذخیره', 'Save')))],
+    ));
+    title.dispose();
+    if (name == null) return;
+    try {
+      await queryStore.add({'id': DateTime.now().microsecondsSinceEpoch.toString(), 'title': name,
+        'serverId': tab.serverId, 'database': tab.database, 'sql': tab.editor.text, 'at': DateTime.now().toIso8601String()}, saved: true);
+      notify(tr('کوئری ذخیره شد.', 'Query saved.'));
+    } catch (e) { notify(e); }
+  }
+
+  Future<void> openQueryLibrary() async {
+    final entry = await showModalBottomSheet<Map<String, dynamic>>(context: context,
+      isScrollControlled: true, showDragHandle: true,
+      builder: (ctx) => SizedBox(height: MediaQuery.sizeOf(ctx).height * .85,
+        child: QueryLibrary(repository: queryStore, serverNames: {for (final p in profiles) p.id: p.name})));
+    if (!mounted || entry == null) return;
+    final server = profiles.where((p) => p.id == entry['serverId']).firstOrNull;
+    if (server == null) return;
+    setState(() {
+      if (selected?.id != server.id) { databases = []; tables = []; }
+      ++explorerRequest; selected = server; selectedDb = entry['database'] as String; loading = false;
+    });
+    newTab(entry['sql'] as String);
   }
 
   Future<void> reload() async {
@@ -111,6 +199,7 @@ class _SqlHomeState extends State<SqlHome> {
     final request = ++explorerRequest;
     setState(() {
       selectedTab = tabs.where((t) => t.serverId == p.id).lastOrNull?.id;
+      schedulePersist();
       selected = p; selectedDb = p.startDatabase; databases = []; tables = [];
       error = null; loading = true; page = 1;
     });
@@ -150,8 +239,10 @@ class _SqlHomeState extends State<SqlHome> {
   void newTab([String query = '']) {
     final p = selected, db = selectedDb;
     if (p == null || db == null) return;
-    final tab = QueryTab(p.id, db, query);
+    final tab = QueryTab(p.id, db, sql: query);
+    tab.editor.addListener(schedulePersist);
     setState(() { tabs.add(tab); selectedTab = tab.id; page = 2; });
+    schedulePersist();
   }
 
   QueryTab? get currentTab {
@@ -172,12 +263,14 @@ class _SqlHomeState extends State<SqlHome> {
       }
     });
     tab.editor.dispose(); tab.undo.dispose();
+    schedulePersist();
   }
 
   Future<void> run(QueryTab tab) async {
     if (tab.running || tab.confirming || tab.editor.text.trim().isEmpty) return;
     final p = profiles.where((p) => p.id == tab.serverId).firstOrNull;
     if (p == null) return;
+    final database = tab.database;
     final selection = tab.editor.selection;
     final statement = selection.isValid && !selection.isCollapsed
       ? selection.textInside(tab.editor.text) : tab.editor.text;
@@ -204,7 +297,7 @@ class _SqlHomeState extends State<SqlHome> {
     final token = MssqlCancellationToken();
     setState(() { tab.running = true; tab.error = null; tab.result = null; tab.elapsed = null; tab.cancellation = token; });
     try {
-      final value = await sql.query(p, tab.database, await password(p), statement, sessionId: tab.id, cancellationToken: token);
+      final value = await sql.query(p, database, await password(p), statement, sessionId: tab.id, cancellationToken: token);
       if (mounted && tabs.contains(tab)) setState(() => tab.result = value);
     } catch (e) {
       if (mounted && tabs.contains(tab)) setState(() => tab.error = e.toString());
@@ -213,6 +306,11 @@ class _SqlHomeState extends State<SqlHome> {
       if (mounted && tabs.contains(tab)) setState(() {
         tab.running = false; tab.cancellation = null; tab.elapsed = timer.elapsed;
       });
+      try {
+        await queryStore.add({'id': DateTime.now().microsecondsSinceEpoch.toString(),
+          'serverId': p.id, 'database': database, 'sql': statement, 'title': statement.trim().split('\n').first,
+          'at': DateTime.now().toIso8601String(), 'elapsedMs': timer.elapsedMilliseconds, 'success': tab.error == null}, saved: false);
+      } catch (e) { notify(e); }
     }
   }
 
@@ -251,6 +349,7 @@ class _SqlHomeState extends State<SqlHome> {
       setState(() { selected = null; selectedTab = null; page = 0; });
     }
     await reload();
+    schedulePersist();
   }
 
   Widget avatar(ServerProfile p) {
@@ -374,8 +473,8 @@ class _SqlHomeState extends State<SqlHome> {
       SizedBox(height: 54, child: ListView(scrollDirection: Axis.horizontal, children: [
         for (final t in visible) Padding(padding: const EdgeInsets.all(4),
           child: InputChip(
-            selected: selectedTab == t.id, label: Text(t.database),
-            onPressed: () => setState(() => selectedTab = t.id),
+            selected: selectedTab == t.id, label: Text('${visible.indexOf(t) + 1} · ${t.database}'),
+            onPressed: () { setState(() => selectedTab = t.id); schedulePersist(); },
             onDeleted: t.running || t.confirming ? null : () => closeTab(t))),
         IconButton(icon: const Icon(Icons.add_circle_outline), onPressed: () => newTab()),
       ])),
@@ -386,7 +485,7 @@ class _SqlHomeState extends State<SqlHome> {
         Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Row(children: [
           Expanded(child: DropdownButton<String>(isExpanded: true, value: tab.database,
             items: [for (final db in {tab.database, ...databases}) DropdownMenuItem(value: db, child: Text(db, overflow: TextOverflow.ellipsis))],
-            onChanged: tab.running ? null : (db) { if (db != null) setState(() => tab.database = db); })),
+            onChanged: tab.running ? null : (db) { if (db != null) { setState(() => tab.database = db); schedulePersist(); } })),
           const SizedBox(width: 8),
           if (tab.running) IconButton(tooltip: tr('لغو اجرا', 'Cancel query'),
             onPressed: () => tab.cancellation?.cancel('Cancelled by user'), icon: const Icon(Icons.stop_circle_outlined))
@@ -397,6 +496,7 @@ class _SqlHomeState extends State<SqlHome> {
             IconButton(tooltip: tr('واگرد', 'Undo'), onPressed: !tab.running && value.canUndo ? tab.undo.undo : null, icon: const Icon(Icons.undo)),
             IconButton(tooltip: tr('ازنو', 'Redo'), onPressed: !tab.running && value.canRedo ? tab.undo.redo : null, icon: const Icon(Icons.redo)),
           ])),
+          IconButton(tooltip: tr('ذخیره کوئری', 'Save query'), onPressed: () => saveQuery(tab), icon: const Icon(Icons.bookmark_add_outlined)),
           TextButton.icon(onPressed: tab.running ? null : () {
             final formatted = formatSql(tab.editor.text);
             tab.editor.value = TextEditingValue(text: formatted, selection: TextSelection.collapsed(offset: formatted.length));
@@ -428,13 +528,14 @@ class _SqlHomeState extends State<SqlHome> {
           Flexible(child: Text(selected == null ? 'OdinSQL' : 'OdinSQL · ${selected!.name}', overflow: TextOverflow.ellipsis)),
         ]),
         actions: [
+          IconButton(tooltip: tr('تاریخچه و کوئری‌ها', 'History and saved queries'), onPressed: booting ? null : openQueryLibrary, icon: const Icon(Icons.history)),
           if (selected != null) IconButton(tooltip: tr('کوئری جدید', 'New query'),
             onPressed: () => newTab(), icon: const Icon(Icons.add_box_outlined)),
           IconButton(tooltip: tr('تنظیمات', 'Settings'), onPressed: () => showStudioSettings(context),
             icon: const Icon(Icons.tune_rounded)),
         ],
       ),
-      body: Row(children: [
+      body: booting ? const Center(child: CircularProgressIndicator()) : Row(children: [
         if (wide) NavigationRail(selectedIndex: page,
           onDestinationSelected: (i) => setState(() => page = i),
           labelType: NavigationRailLabelType.all,
@@ -442,7 +543,7 @@ class _SqlHomeState extends State<SqlHome> {
         Expanded(child: AnimatedSwitcher(duration: const Duration(milliseconds: 180),
           child: KeyedSubtree(key: ValueKey(page), child: [servers, explorer, queries][page]()))),
       ]),
-      floatingActionButton: page == 0 ? FloatingActionButton.extended(
+      floatingActionButton: page == 0 && !booting ? FloatingActionButton.extended(
         onPressed: () => edit(), icon: const Icon(Icons.add), label: Text(tr('سرور جدید', 'Add server')),
       ) : null,
       bottomNavigationBar: wide ? null : NavigationBar(
