@@ -567,7 +567,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       appBar: AppBar(
         toolbarHeight: keyboard ? 40 : null,
         title: Row(children: [
-          Icon(Icons.storage_rounded, color: Theme.of(context).colorScheme.primary),
+          ClipRRect(borderRadius: BorderRadius.circular(7), child: Image.asset('assets/branding/odinsql_launcher.png', width: 30, height: 30)),
           const SizedBox(width: 10),
           Flexible(child: Text(selected == null ? 'OdinSQL' : 'OdinSQL · ${selected!.name}', overflow: TextOverflow.ellipsis)),
         ]),
