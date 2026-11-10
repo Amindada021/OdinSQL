@@ -219,7 +219,8 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
         databases = names; selectedDb = db; tables = found;
       });
     } catch (e) {
-      if (mounted && request == explorerRequest) setState(() => error = e.toString());
+      final details = await sql.explainConnectionFailure(p, e);
+      if (mounted && request == explorerRequest) setState(() => error = details);
     } finally {
       if (mounted && request == explorerRequest) setState(() => loading = false);
     }
@@ -407,7 +408,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       final c = await probe.open(p, p.startDatabase, await password(p));
       await c.queryRows('SELECT 1 AS connected');
       notify(tr('اتصال موفق بود: ${p.name}', 'Connection successful: ${p.name}'));
-    } catch (e) { notify(e); }
+    } catch (e) { notify(await probe.explainConnectionFailure(p, e)); }
     finally {
       try { await probe.closeAll(); } catch (e) { notify(e); }
       if (mounted) setState(() => testing.remove(p.id));
@@ -640,7 +641,10 @@ class _ServerEditorState extends State<ServerEditor> {
       final c = await manager.open(p, p.startDatabase, pass);
       await c.queryRows('SELECT 1 AS connected');
       if (mounted) setState(() => testMessage = tr('اتصال موفق بود', 'Connection successful'));
-    } catch (e) { if (mounted) setState(() => testMessage = e.toString()); }
+    } catch (e) {
+      final details = await manager.explainConnectionFailure(profile(), e);
+      if (mounted) setState(() => testMessage = details);
+    }
     finally {
       try { await manager.closeAll(); } catch (e) { if (mounted) setState(() => testMessage = e.toString()); }
       if (mounted) setState(() => testing = false);
