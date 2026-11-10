@@ -6,9 +6,11 @@ import 'package:mssql_native/mssql_native.dart';
 import 'data/server_repository.dart';
 import 'data/sql_manager.dart';
 import 'models/server_profile.dart';
+import 'ui/app_settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await appSettings.load();
   await MssqlRuntime.instance.initialize();
   runApp(const OdinSqlApp());
 }
@@ -16,12 +18,18 @@ Future<void> main() async {
 class OdinSqlApp extends StatelessWidget {
   const OdinSqlApp({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    debugShowCheckedModeBanner: false,
-    title: 'OdinSQL',
-    theme: ThemeData(useMaterial3: true, brightness: Brightness.dark,
-      colorSchemeSeed: const Color(0xff587cff)),
-    home: const SqlHome(),
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: appSettings,
+    builder: (context, _) => MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'OdinSQL', theme: studioTheme(Brightness.light),
+      darkTheme: studioTheme(Brightness.dark), themeMode: appSettings.theme,
+      builder: (context, child) => Directionality(
+        textDirection: appSettings.persian ? TextDirection.rtl : TextDirection.ltr,
+        child: child!,
+      ),
+      home: const SqlHome(),
+    ),
   );
 }
 
@@ -222,8 +230,8 @@ class _SqlHomeState extends State<SqlHome> {
     );
   }
 
-  Widget servers() => ListView(padding: const EdgeInsets.all(12), children: [
-    Text('سرورهای من', style: Theme.of(context).textTheme.headlineSmall),
+  Widget servers() => ListView(padding: const EdgeInsets.fromLTRB(16, 20, 16, 100), children: [
+    Text(tr('سرورهای من', 'My servers'), style: Theme.of(context).textTheme.headlineSmall),
     const SizedBox(height: 12),
     if (profiles.isEmpty) const Padding(
       padding: EdgeInsets.all(24),
@@ -367,30 +375,42 @@ class _SqlHomeState extends State<SqlHome> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: Text(selected == null ? 'OdinSQL' : 'OdinSQL  •  ${selected!.name}'),
-      actions: [
-        IconButton(tooltip: 'سرورها', onPressed: () => setState(() => page = 0),
-          icon: const Icon(Icons.dns_outlined)),
-        if (selected != null) IconButton(tooltip: 'New Query',
-          onPressed: () => newTab(), icon: const Icon(Icons.add_box_outlined)),
-      ],
-    ),
-    body: IndexedStack(index: page, children: [servers(), explorer(), queries()]),
-    floatingActionButton: page == 0 ? FloatingActionButton.extended(
-      onPressed: () => edit(), icon: const Icon(Icons.add), label: const Text('سرور جدید'),
-    ) : null,
-    bottomNavigationBar: NavigationBar(
-      selectedIndex: page,
-      onDestinationSelected: (i) => setState(() => page = i),
-      destinations: const [
-        NavigationDestination(icon: Icon(Icons.dns_outlined), label: 'Servers'),
-        NavigationDestination(icon: Icon(Icons.account_tree_outlined), label: 'Explorer'),
-        NavigationDestination(icon: Icon(Icons.code), label: 'SQL'),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 800;
+    final destinations = [
+      NavigationDestination(icon: const Icon(Icons.dns_outlined), label: tr('سرورها', 'Servers')),
+      NavigationDestination(icon: const Icon(Icons.account_tree_outlined), label: tr('کاوشگر', 'Explorer')),
+      NavigationDestination(icon: const Icon(Icons.code), label: 'SQL'),
+    ];
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(children: [
+          Icon(Icons.storage_rounded, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 10),
+          Flexible(child: Text(selected == null ? 'OdinSQL' : 'OdinSQL · ${selected!.name}', overflow: TextOverflow.ellipsis)),
+        ]),
+        actions: [
+          if (selected != null) IconButton(tooltip: tr('کوئری جدید', 'New query'),
+            onPressed: () => newTab(), icon: const Icon(Icons.add_box_outlined)),
+          IconButton(tooltip: tr('تنظیمات', 'Settings'), onPressed: () => showStudioSettings(context),
+            icon: const Icon(Icons.tune_rounded)),
+        ],
+      ),
+      body: Row(children: [
+        if (wide) NavigationRail(selectedIndex: page,
+          onDestinationSelected: (i) => setState(() => page = i),
+          labelType: NavigationRailLabelType.all,
+          destinations: [for (final d in destinations) NavigationRailDestination(icon: d.icon, label: Text(d.label))]),
+        Expanded(child: AnimatedSwitcher(duration: const Duration(milliseconds: 180),
+          child: KeyedSubtree(key: ValueKey(page), child: [servers, explorer, queries][page]()))),
+      ]),
+      floatingActionButton: page == 0 ? FloatingActionButton.extended(
+        onPressed: () => edit(), icon: const Icon(Icons.add), label: Text(tr('سرور جدید', 'Add server')),
+      ) : null,
+      bottomNavigationBar: wide ? null : NavigationBar(
+        selectedIndex: page, onDestinationSelected: (i) => setState(() => page = i), destinations: destinations),
+    );
+  }
 }
 
 class EditedServer {
@@ -488,3 +508,4 @@ class _ServerEditorState extends State<ServerEditor> {
     ],
   );
 }
+

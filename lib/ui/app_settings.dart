@@ -1,0 +1,79 @@
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+final appSettings = AppSettings();
+String tr(String fa, String en) => appSettings.persian ? fa : en;
+
+class AppSettings extends ChangeNotifier {
+  ThemeMode theme = ThemeMode.dark;
+  bool persian = true;
+  double fontSize = 14;
+  int timeoutSeconds = 30;
+
+  Future<void> load() async {
+    final p = await SharedPreferences.getInstance();
+    theme = ThemeMode.values[p.getInt('theme')?.clamp(0, 2) ?? 2];
+    persian = p.getBool('persian') ?? true;
+    fontSize = (p.getDouble('editorFont') ?? 14).clamp(10, 24);
+    timeoutSeconds = (p.getInt('queryTimeout') ?? 30).clamp(5, 600);
+  }
+
+  Future<void> save() async {
+    notifyListeners();
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('theme', theme.index);
+    await p.setBool('persian', persian);
+    await p.setDouble('editorFont', fontSize);
+    await p.setInt('queryTimeout', timeoutSeconds);
+  }
+}
+
+ThemeData studioTheme(Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  final scheme = ColorScheme.fromSeed(
+    seedColor: const Color(0xff6688ff), brightness: brightness,
+    surface: dark ? const Color(0xff171c28) : const Color(0xfff7f8fc),
+  );
+  return ThemeData(
+    useMaterial3: true, colorScheme: scheme,
+    scaffoldBackgroundColor: dark ? const Color(0xff10141f) : const Color(0xffeef1f8),
+    appBarTheme: AppBarTheme(backgroundColor: scheme.surface, centerTitle: false),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true, fillColor: scheme.surface,
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    ),
+    navigationBarTheme: const NavigationBarThemeData(height: 68),
+    dividerTheme: DividerThemeData(color: scheme.outlineVariant.withValues(alpha: .5)),
+    snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+  );
+}
+
+Future<void> showStudioSettings(BuildContext context) => showModalBottomSheet<void>(
+  context: context, isScrollControlled: true, showDragHandle: true,
+  builder: (context) => StatefulBuilder(builder: (context, refresh) {
+    void update(VoidCallback change) { change(); appSettings.save(); refresh(() {}); }
+    return SafeArea(child: SingleChildScrollView(child: Padding(
+      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(tr('تنظیمات محیط', 'Studio settings'), style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 20),
+        SegmentedButton<ThemeMode>(segments: [
+          ButtonSegment(value: ThemeMode.light, icon: const Icon(Icons.light_mode_outlined), label: Text(tr('روشن', 'Light'))),
+          ButtonSegment(value: ThemeMode.dark, icon: const Icon(Icons.dark_mode_outlined), label: Text(tr('تیره', 'Dark'))),
+          ButtonSegment(value: ThemeMode.system, icon: const Icon(Icons.brightness_auto_outlined), label: Text(tr('سیستم', 'System'))),
+        ], selected: {appSettings.theme}, onSelectionChanged: (v) => update(() => appSettings.theme = v.first)),
+        SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('فارسی / English'),
+          value: appSettings.persian, onChanged: (v) => update(() => appSettings.persian = v)),
+        Text('${tr('اندازه فونت SQL', 'SQL font size')}: ${appSettings.fontSize.round()}'),
+        Slider(min: 10, max: 24, divisions: 14, value: appSettings.fontSize,
+          onChanged: (v) => update(() => appSettings.fontSize = v)),
+        Text(tr('مهلت اجرای کوئری (ثانیه)', 'Query timeout (seconds)')),
+        DropdownButton<int>(value: appSettings.timeoutSeconds,
+          items: [for (final v in [5, 15, 30, 60, 120, 300, 600])
+            DropdownMenuItem(value: v, child: Text('$v'))],
+          onChanged: (v) { if (v != null) update(() => appSettings.timeoutSeconds = v); }),
+      ]),
+    )));
+  }),
+);
