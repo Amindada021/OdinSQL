@@ -105,7 +105,7 @@ class _SqlEditorState extends State<SqlEditor> {
     final lineHeight = font * 1.6;
     final longest = lines.fold<int>(0, (n, line) => math.max(n, line.replaceAll('\t', '    ').length));
     final p = prefix.toLowerCase();
-    final candidates = p.isEmpty || widget.readOnly ? <String>[] :
+    final candidates = p.isEmpty || widget.readOnly || (MediaQuery.orientationOf(context) == Orientation.landscape && MediaQuery.viewInsetsOf(context).bottom > 0) ? <String>[] :
       {...widget.suggestions, ...sqlKeywords}.where((s) => s.toLowerCase().startsWith(p) && s.toLowerCase() != p).take(10).toList();
     return Column(children: [
       Expanded(child: Directionality(textDirection: TextDirection.ltr, child: LayoutBuilder(builder: (context, constraints) =>

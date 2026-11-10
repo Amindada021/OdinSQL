@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mssql_native/mssql_native.dart';
 import 'data/server_repository.dart';
@@ -27,6 +28,9 @@ class OdinSqlApp extends StatelessWidget {
     listenable: appSettings,
     builder: (context, _) => MaterialApp(
       debugShowCheckedModeBanner: false,
+      locale: Locale(appSettings.persian ? 'fa' : 'en'),
+      supportedLocales: const [Locale('fa'), Locale('en')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
       title: 'OdinSQL', theme: studioTheme(Brightness.light),
       darkTheme: studioTheme(Brightness.dark), themeMode: appSettings.theme,
       builder: (context, child) => Directionality(
@@ -49,6 +53,7 @@ class QueryTab {
   MssqlCancellationToken? cancellation;
   Duration? elapsed;
   bool confirming = false;
+  bool editorOnly = false;
   MssqlExecutionResult? result;
   String? error;
   bool running = false;
@@ -191,23 +196,24 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
 
   Future<String> password(ServerProfile p) async {
     final pass = await store.passwordFor(p);
-    if (pass == null || pass.isEmpty) throw StateError('رمز این اتصال ذخیره نشده است.');
+    if (pass == null || pass.isEmpty) throw StateError(tr('رمز این اتصال ذخیره نشده است.', 'No password is saved for this connection.'));
     return pass;
   }
 
-  Future<void> connect(ServerProfile p) async {
+  Future<void> connect(ServerProfile p, {String? database}) async {
     final request = ++explorerRequest;
     setState(() {
       selectedTab = tabs.where((t) => t.serverId == p.id).lastOrNull?.id;
       schedulePersist();
-      selected = p; selectedDb = p.startDatabase; databases = []; tables = [];
+      selected = p; selectedDb = database ?? p.startDatabase; databases = []; tables = [];
       error = null; loading = true; page = 1;
     });
     try {
       final pass = await password(p);
       final names = await sql.databases(p, pass);
-      final db = names.contains(p.startDatabase) ? p.startDatabase
-          : (names.isEmpty ? p.startDatabase : names.first);
+      final preferred = database ?? p.startDatabase;
+      final db = names.contains(preferred) ? preferred
+          : (names.isEmpty ? preferred : names.first);
       final found = await sql.tables(p, db, pass);
       if (mounted && request == explorerRequest) setState(() {
         databases = names; selectedDb = db; tables = found;
@@ -275,18 +281,19 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
     final statement = selection.isValid && !selection.isCollapsed
       ? selection.textInside(tab.editor.text) : tab.editor.text;
     if (statement.trim().isEmpty) return;
+    FocusManager.instance.primaryFocus?.unfocus();
     tab.confirming = true;
     final dangerous = RegExp(
       r'\b(INSERT|UPDATE|DELETE|MERGE|DROP|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|'
-      r'BACKUP|RESTORE|GRANT|DENY|REVOKE)\b', caseSensitive: false);
+      r'BACKUP|RESTORE|GRANT|DENY|REVOKE|DBCC|KILL|SHUTDOWN|RECONFIGURE)\b', caseSensitive: false);
     if (dangerous.hasMatch(statement)) {
       final ok = await showDialog<bool>(context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('تأیید اجرای کوئری'),
-          content: Text('این دستور ممکن است دیتابیس ${tab.database} را تغییر دهد. اجرا شود؟'),
+          title: Text(tr('تأیید اجرای کوئری', 'Confirm execution')),
+          content: Text(tr('این دستور ممکن است دیتابیس ${p.name} / $database را تغییر دهد. اجرا شود؟', 'This statement may change ${p.name} / $database. Execute?')),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('انصراف')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('اجرا')),
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('انصراف', 'Cancel'))),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('اجرا', 'Execute'))),
           ],
         ));
       if (ok != true) { tab.confirming = false; return; }
@@ -315,34 +322,38 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
   }
 
   Future<void> edit([ServerProfile? old]) async {
-    if (old != null && (busyServer(old.id) || tabs.any((t) => t.serverId == old.id && t.confirming))) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
+    if (old != null && busyServer(old.id)) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
     final value = await showDialog<EditedServer>(context: context,
       builder: (_) => ServerEditor(old));
-    if (value == null) return;
+    if (!mounted || value == null) return;
+    if (old != null && busyServer(old.id)) return;
     try {
+      ++explorerRequest;
       if (old != null) await sql.closeServer(old);
       await store.save(value.profile, password: value.password);
       await reload();
-      if (selected?.id == value.profile.id) {
-        setState(() { selected = null; page = 0; });
+      if (selected?.id == value.profile.id && mounted) {
+        setState(() { selected = null; page = 0; loading = false; });
       }
+      schedulePersist();
     } catch (e) { notify(e); }
   }
 
   Future<void> remove(ServerProfile p) async {
     if (busyServer(p.id)) { notify(tr('منتظر پایان کوئری بمانید.', 'Wait for running queries to finish.')); return; }
     final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
-      title: Text('حذف ${p.name}'),
-      content: const Text('تنها مشخصات اتصال از گوشی پاک می‌شود؛ دیتابیس حذف نمی‌شود.'),
+      title: Text(tr('حذف ${p.name}', 'Remove ${p.name}')),
+      content: Text(tr('تنها مشخصات اتصال از گوشی پاک می‌شود؛ دیتابیس حذف نمی‌شود.', 'Remove this connection profile from your phone? The database is preserved.')),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('انصراف')),
-        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('حذف')),
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('انصراف', 'Cancel'))),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('حذف', 'Delete'))),
       ],
     ));
-    if (ok != true) return;
+    if (!mounted || ok != true || busyServer(p.id)) return;
     ++explorerRequest;
     await sql.closeServer(p);
     await store.remove(p);
+    if (!mounted) return;
     final owned = tabs.where((t) => t.serverId == p.id).toList();
     for (final t in owned) { tabs.remove(t); t.editor.dispose(); t.undo.dispose(); }
     if (selected?.id == p.id) {
@@ -360,6 +371,23 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       child: content == null ? const Icon(Icons.dns, color: Colors.white) :
         Image.memory(content, fit: BoxFit.cover),
     );
+  }
+
+  Future<void> showServerInfo(ServerProfile p) async {
+    final info = () async => sql.serverInfo(p, await password(p));
+    final future = info();
+    await showDialog<void>(context: context, builder: (ctx) => AlertDialog(
+      title: Text(tr('اطلاعات سرور', 'Server information')),
+      content: SizedBox(width: 500, child: FutureBuilder<Map<String, Object?>>(
+        future: future, builder: (context, state) {
+          if (state.hasError) return SelectableText('${state.error}');
+          if (!state.hasData) return const SizedBox(height: 80, child: Center(child: CircularProgressIndicator()));
+          return SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [for (final item in state.data!.entries)
+              Padding(padding: const EdgeInsets.only(bottom: 12), child: SelectableText('${item.key}\n${item.value ?? 'NULL'}'))]));
+        })),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(tr('بستن', 'Close')))],
+    ));
   }
 
   Future<void> toggleFavorite(ServerProfile p) async {
@@ -439,11 +467,13 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
             switch (v) {
               case 'edit': edit(p); break;
               case 'test': testServer(p); break;
+              case 'info': showServerInfo(p); break;
               case 'disconnect': disconnect(p); break;
               case 'delete': remove(p); break;
             }
           }, itemBuilder: (_) => [
             PopupMenuItem(value: 'edit', child: Text(tr('ویرایش', 'Edit'))),
+            PopupMenuItem(value: 'info', child: Text(tr('اطلاعات سرور', 'Server information'))),
             PopupMenuItem(value: 'test', enabled: !testing.contains(p.id), child: Text(tr('تست اتصال', 'Test connection'))),
             PopupMenuItem(value: 'disconnect', enabled: sql.isConnected(p), child: Text(tr('قطع اتصال', 'Disconnect'))),
             PopupMenuItem(value: 'delete', child: Text(tr('حذف', 'Delete'))),
@@ -461,16 +491,17 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       if (error != null) Padding(padding: const EdgeInsets.all(12), child: SelectableText(error!, style: TextStyle(color: Theme.of(context).colorScheme.error))),
       Expanded(child: ObjectExplorer(key: ValueKey('${p.id}/$db/$explorerRequest'),
         server: p, database: db, databases: databases, manager: sql, password: () => password(p),
-        onDatabase: useDb, onQuery: newTab, onRefresh: () => connect(p))),
+        onDatabase: useDb, onQuery: newTab, onRefresh: () => connect(p, database: db))),
     ]);
   }
 
   Widget queries() {
-    if (selected == null) return const Center(child: Text('ابتدا سرور را انتخاب کنید.'));
+    if (selected == null) return Center(child: Text(tr('ابتدا سرور را انتخاب کنید.', 'Select a server first.')));
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
     final visible = tabs.where((t) => t.serverId == selected?.id).toList();
     final tab = currentTab;
     return Column(children: [
-      SizedBox(height: 54, child: ListView(scrollDirection: Axis.horizontal, children: [
+      SizedBox(height: keyboard ? 40 : 48, child: ListView(scrollDirection: Axis.horizontal, children: [
         for (final t in visible) Padding(padding: const EdgeInsets.all(4),
           child: InputChip(
             selected: selectedTab == t.id, label: Text('${visible.indexOf(t) + 1} · ${t.database}'),
@@ -480,7 +511,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       ])),
       if (tab == null) Expanded(child: Center(child:
         FilledButton.icon(onPressed: () => newTab(), icon: const Icon(Icons.add),
-          label: const Text('New Query'))))
+          label: Text(tr('کوئری جدید', 'New query')))))
       else Expanded(child: Column(children: [
         Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Row(children: [
           Expanded(child: DropdownButton<String>(isExpanded: true, value: tab.database,
@@ -491,11 +522,12 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
             onPressed: () => tab.cancellation?.cancel('Cancelled by user'), icon: const Icon(Icons.stop_circle_outlined))
           else FilledButton.icon(onPressed: () => run(tab), icon: const Icon(Icons.play_arrow), label: Text(tr('اجرا', 'Execute'))),
         ])),
-        SizedBox(height: 42, child: ListView(scrollDirection: Axis.horizontal, children: [
+        if (!keyboard) SizedBox(height: 42, child: ListView(scrollDirection: Axis.horizontal, children: [
           ValueListenableBuilder<UndoHistoryValue>(valueListenable: tab.undo, builder: (context, value, _) => Row(children: [
             IconButton(tooltip: tr('واگرد', 'Undo'), onPressed: !tab.running && value.canUndo ? tab.undo.undo : null, icon: const Icon(Icons.undo)),
             IconButton(tooltip: tr('ازنو', 'Redo'), onPressed: !tab.running && value.canRedo ? tab.undo.redo : null, icon: const Icon(Icons.redo)),
           ])),
+          IconButton(tooltip: tr('نمایش نتایج', 'Toggle results'), onPressed: () => setState(() => tab.editorOnly = !tab.editorOnly), icon: Icon(tab.editorOnly ? Icons.vertical_split_outlined : Icons.code)),
           IconButton(tooltip: tr('ذخیره کوئری', 'Save query'), onPressed: () => saveQuery(tab), icon: const Icon(Icons.bookmark_add_outlined)),
           TextButton.icon(onPressed: tab.running ? null : () {
             final formatted = formatSql(tab.editor.text);
@@ -503,11 +535,17 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
           }, icon: const Icon(Icons.format_align_left), label: const Text('Format SQL')),
           Padding(padding: const EdgeInsets.all(10), child: Text(tr('انتخاب متن = اجرای همان بخش', 'Select text to execute selection'))),
         ])),
-        Expanded(flex: 2, child: SqlEditor(key: ValueKey(tab.id), controller: tab.editor, undo: tab.undo,
-          readOnly: tab.running, suggestions: [for (final t in tables) t.name, for (final t in tables) '${t.schema}.${t.name}'])),
         if (tab.running) const LinearProgressIndicator(),
-        Expanded(flex: 3, child: ResultPane(key: ValueKey('result/${tab.id}'),
-          result: tab.result, error: tab.error, elapsed: tab.elapsed)),
+        Expanded(child: LayoutBuilder(builder: (context, bounds) {
+          final editor = SqlEditor(key: ValueKey(tab.id), controller: tab.editor, undo: tab.undo,
+            readOnly: tab.running, suggestions: [for (final t in tables) t.name, for (final t in tables) '${t.schema}.${t.name}']);
+          if (keyboard || tab.editorOnly) return editor;
+          final results = ResultPane(key: ValueKey('result/${tab.id}'), result: tab.result, error: tab.error, elapsed: tab.elapsed);
+          if (bounds.maxWidth > 650 && bounds.maxWidth > bounds.maxHeight * 1.4) {
+            return Row(children: [Expanded(child: editor), const VerticalDivider(width: 1), Expanded(child: results)]);
+          }
+          return Column(children: [Expanded(flex: 2, child: editor), const Divider(height: 1), Expanded(flex: 3, child: results)]);
+        })),
       ])),
     ]);
   }
@@ -515,6 +553,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 800;
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
     final destinations = [
       NavigationDestination(icon: const Icon(Icons.dns_outlined), label: tr('سرورها', 'Servers')),
       NavigationDestination(icon: const Icon(Icons.account_tree_outlined), label: tr('کاوشگر', 'Explorer')),
@@ -522,6 +561,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
     ];
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: keyboard ? 40 : null,
         title: Row(children: [
           Icon(Icons.storage_rounded, color: Theme.of(context).colorScheme.primary),
           const SizedBox(width: 10),
@@ -546,7 +586,7 @@ class _SqlHomeState extends State<SqlHome> with WidgetsBindingObserver {
       floatingActionButton: page == 0 && !booting ? FloatingActionButton.extended(
         onPressed: () => edit(), icon: const Icon(Icons.add), label: Text(tr('سرور جدید', 'Add server')),
       ) : null,
-      bottomNavigationBar: wide ? null : NavigationBar(
+      bottomNavigationBar: wide || keyboard ? null : NavigationBar(
         selectedIndex: page, onDestinationSelected: (i) => setState(() => page = i), destinations: destinations),
     );
   }
@@ -613,7 +653,7 @@ class _ServerEditorState extends State<ServerEditor> {
     final bytes = await image.readAsBytes();
     if (bytes.length > 300000) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('عکس خیلی بزرگ است.')));
+        SnackBar(content: Text(tr('عکس خیلی بزرگ است.', 'Image is too large.'))));
       return;
     }
     if (mounted) setState(() => picture = base64Encode(bytes));
@@ -621,25 +661,25 @@ class _ServerEditorState extends State<ServerEditor> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.existing == null ? 'سرور جدید' : 'ویرایش سرور'),
+    title: Text(widget.existing == null ? tr('سرور جدید', 'Add server') : tr('ویرایش سرور', 'Edit server')),
     content: SizedBox(width: 420, child: SingleChildScrollView(child: Form(
       key: form,
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextFormField(controller: name, decoration: const InputDecoration(labelText: 'نام دلخواه'),
-          validator: (v) => v == null || v.trim().isEmpty ? 'نام را وارد کنید' : null),
+        TextFormField(controller: name, decoration: InputDecoration(labelText: tr('نام دلخواه', 'Display name')),
+          validator: (v) => v == null || v.trim().isEmpty ? tr('نام را وارد کنید', 'Enter a name') : null),
         TextFormField(controller: host, decoration: const InputDecoration(labelText: 'IP / Host'),
-          validator: (v) => v == null || v.trim().isEmpty ? 'IP را وارد کنید' : null),
+          validator: (v) => v == null || v.trim().isEmpty ? tr('IP را وارد کنید', 'Enter a host or IP') : null),
         TextFormField(controller: port, keyboardType: TextInputType.number,
           decoration: const InputDecoration(labelText: 'TCP Port'),
           validator: (v) => (int.tryParse(v ?? '') ?? 0) < 1 ||
-              (int.tryParse(v ?? '') ?? 0) > 65535 ? 'پورت نامعتبر' : null),
+              (int.tryParse(v ?? '') ?? 0) > 65535 ? tr('پورت نامعتبر', 'Invalid port') : null),
         TextFormField(controller: user, decoration: const InputDecoration(labelText: 'Username'),
-          validator: (v) => v == null || v.trim().isEmpty ? 'نام کاربری را وارد کنید' : null),
+          validator: (v) => v == null || v.trim().isEmpty ? tr('نام کاربری را وارد کنید', 'Enter a username') : null),
         TextFormField(controller: password, obscureText: true,
           decoration: InputDecoration(labelText: widget.existing == null
-              ? 'Password' : 'Password (خالی = بدون تغییر)'),
+              ? tr('رمز عبور', 'Password') : tr('رمز عبور (خالی = بدون تغییر)', 'Password (blank = unchanged)')),
           validator: (v) => widget.existing == null && (v == null || v.isEmpty)
-            ? 'رمز عبور را وارد کنید' : null),
+            ? tr('رمز عبور را وارد کنید', 'Enter a password') : null),
         TextFormField(controller: database,
           decoration: const InputDecoration(labelText: 'Initial Database')),
         if (testing) const LinearProgressIndicator(),
@@ -655,17 +695,18 @@ class _ServerEditorState extends State<ServerEditor> {
                 child: c == colorValue ? const Icon(Icons.check, size: 18) : null)),
         ]),
         const SizedBox(height: 10),
+        if (picture != null) TextButton(onPressed: () => setState(() => picture = null), child: Text(tr('حذف عکس', 'Remove image'))),
         OutlinedButton.icon(onPressed: pickImage, icon: const Icon(Icons.image_outlined),
-          label: Text(picture == null ? 'انتخاب عکس سرور' : 'تغییر عکس')),
+          label: Text(picture == null ? tr('انتخاب عکس سرور', 'Choose server image') : tr('تغییر عکس', 'Change image'))),
       ]),
     ))),
     actions: [
-      TextButton(onPressed: () => Navigator.pop(context), child: const Text('انصراف')),
+      TextButton(onPressed: () => Navigator.pop(context), child: Text(tr('انصراف', 'Cancel'))),
       FilledButton(onPressed: testing ? null : () {
         if (!form.currentState!.validate()) return;
         final p = profile();
         Navigator.pop(context, EditedServer(p, password.text.isEmpty ? null : password.text));
-      }, child: const Text('ذخیره')),
+      }, child: Text(tr('ذخیره', 'Save'))),
     ],
   );
 }

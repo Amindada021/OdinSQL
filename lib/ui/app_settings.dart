@@ -12,10 +12,10 @@ class AppSettings extends ChangeNotifier {
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
-    theme = ThemeMode.values[p.getInt('theme')?.clamp(0, 2) ?? 2];
+    theme = ThemeMode.values[p.getInt('theme')?.clamp(0, 2).toInt() ?? 2];
     persian = p.getBool('persian') ?? true;
-    fontSize = (p.getDouble('editorFont') ?? 14).clamp(10, 24);
-    timeoutSeconds = (p.getInt('queryTimeout') ?? 30).clamp(5, 600);
+    fontSize = (p.getDouble('editorFont') ?? 14).clamp(10, 24).toDouble();
+    timeoutSeconds = (p.getInt('queryTimeout') ?? 30).clamp(5, 600).toInt();
   }
 
   Future<void> save() async {
@@ -52,7 +52,11 @@ ThemeData studioTheme(Brightness brightness) {
 Future<void> showStudioSettings(BuildContext context) => showModalBottomSheet<void>(
   context: context, isScrollControlled: true, showDragHandle: true,
   builder: (context) => StatefulBuilder(builder: (context, refresh) {
-    void update(VoidCallback change) { change(); appSettings.save(); refresh(() {}); }
+    void update(VoidCallback change) {
+      change();
+      appSettings.save().catchError((Object e) { if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e'))); });
+      refresh(() {});
+    }
     return SafeArea(child: SingleChildScrollView(child: Padding(
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -70,7 +74,7 @@ Future<void> showStudioSettings(BuildContext context) => showModalBottomSheet<vo
           onChanged: (v) => update(() => appSettings.fontSize = v)),
         Text(tr('مهلت اجرای کوئری (ثانیه)', 'Query timeout (seconds)')),
         DropdownButton<int>(value: appSettings.timeoutSeconds,
-          items: [for (final v in [5, 15, 30, 60, 120, 300, 600])
+          items: [for (final v in {5, 15, 30, 60, 120, 300, 600, appSettings.timeoutSeconds})
             DropdownMenuItem(value: v, child: Text('$v'))],
           onChanged: (v) { if (v != null) update(() => appSettings.timeoutSeconds = v); }),
       ]),

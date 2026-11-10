@@ -75,7 +75,7 @@ class _ResultPaneState extends State<ResultPane> {
   Widget build(BuildContext context) {
     final result = widget.result;
     final sets = result?.resultSets ?? <MssqlResultSet>[];
-    final index = selected.clamp(0, sets.length);
+    final index = selected.clamp(0, sets.length).toInt();
     final set = index < sets.length ? sets[index] : null;
     return Column(children: [
       SizedBox(height: 40, child: ListView(scrollDirection: Axis.horizontal, children: [

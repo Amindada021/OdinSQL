@@ -61,6 +61,18 @@ class SqlManager {
     return rows.map((row) => row['name'].toString()).toList();
   }
 
+  Future<Map<String, Object?>> serverInfo(ServerProfile server, String password) async {
+    final connection = await open(server, server.startDatabase, password);
+    final rows = await connection.queryRows(
+      "SELECT CAST(SERVERPROPERTY('ServerName') AS nvarchar(256)) AS ServerName, "
+      "CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)) AS ProductVersion, "
+      "CAST(SERVERPROPERTY('Edition') AS nvarchar(256)) AS Edition, "
+      "CAST(SERVERPROPERTY('ProductLevel') AS nvarchar(128)) AS ProductLevel, "
+      "@@SPID AS SessionId, SUSER_SNAME() AS LoginName, DB_NAME() AS CurrentDatabase, @@VERSION AS VersionInfo",
+    );
+    return rows.first;
+  }
+
   Future<List<SqlTable>> tables(
     ServerProfile server,
     String database,
