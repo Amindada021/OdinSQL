@@ -7,6 +7,7 @@ import 'data/server_repository.dart';
 import 'data/sql_manager.dart';
 import 'models/server_profile.dart';
 import 'ui/app_settings.dart';
+import 'ui/object_explorer.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -333,63 +334,15 @@ class _SqlHomeState extends State<SqlHome> {
     ]);
   }
 
-  Future<void> showColumns(SqlTable t) async {
-    final p = selected, db = selectedDb;
-    if (p == null || db == null) return;
-    try {
-      final columns = await sql.columns(p, db, await password(p), t);
-      if (!mounted) return;
-      await showModalBottomSheet<void>(
-        context: context, isScrollControlled: true,
-        builder: (_) => SafeArea(
-          child: SizedBox(height: MediaQuery.sizeOf(context).height * .7,
-            child: Column(children: [
-              ListTile(title: Text('${t.schema}.${t.name}')),
-              Expanded(child: ListView(children: [
-                for (final column in columns)
-                  ListTile(title: Text('${column['column_name']}'),
-                    subtitle: Text('${column['data_type']}  •  Nullable: ${column['nullable']}')),
-              ])),
-            ]),
-          ),
-        ),
-      );
-    } catch (e) { notify(e); }
-  }
-
   Widget explorer() {
-    final p = selected;
-    if (p == null) return const Center(child: Text('ابتدا یک سرور انتخاب کنید.'));
-    return ListView(padding: const EdgeInsets.all(12), children: [
-      Card(child: ListTile(
-        leading: avatar(p), title: Text(p.name),
-        subtitle: Text('${p.host}:${p.port}'),
-        trailing: IconButton(onPressed: loading ? null : () => connect(p), icon: const Icon(Icons.refresh)),
-      )),
+    final p = selected, db = selectedDb;
+    if (p == null || db == null) return Center(child: Text(tr('ابتدا یک سرور انتخاب کنید.', 'Select a server first.')));
+    return Column(children: [
       if (loading) const LinearProgressIndicator(),
-      if (error != null) Text(error!, style: const TextStyle(color: Colors.redAccent)),
-      if (databases.isNotEmpty) DropdownButtonFormField<String>(
-        value: selectedDb,
-        decoration: const InputDecoration(labelText: 'Database'),
-        items: [for (final name in databases) DropdownMenuItem(value: name, child: Text(name))],
-        onChanged: loading ? null : (db) { if (db != null) useDb(db); },
-      ),
-      const SizedBox(height: 14),
-      Row(children: [
-        Text('Tables (${tables.length})', style: Theme.of(context).textTheme.titleMedium),
-        const Spacer(),
-        TextButton.icon(onPressed: () => newTab(), icon: const Icon(Icons.add), label: const Text('New Query')),
-      ]),
-      for (final t in tables) Card(child: ExpansionTile(
-        leading: const Icon(Icons.table_chart_outlined), title: Text('${t.schema}.${t.name}'),
-        children: [
-          ListTile(leading: const Icon(Icons.view_column_outlined),
-            title: const Text('Columns'), onTap: () => showColumns(t)),
-          ListTile(leading: const Icon(Icons.play_arrow_outlined),
-            title: const Text('Select Top 100'),
-            onTap: () => newTab('SELECT TOP (100) * FROM ${t.fullName};')),
-        ],
-      )),
+      if (error != null) Padding(padding: const EdgeInsets.all(12), child: SelectableText(error!, style: TextStyle(color: Theme.of(context).colorScheme.error))),
+      Expanded(child: ObjectExplorer(key: ValueKey('${p.id}/$db/$explorerRequest'),
+        server: p, database: db, databases: databases, manager: sql, password: () => password(p),
+        onDatabase: useDb, onQuery: newTab, onRefresh: () => connect(p))),
     ]);
   }
 

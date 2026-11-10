@@ -2,6 +2,11 @@ import 'package:mssql_native/mssql_native.dart';
 
 import '../models/server_profile.dart';
 
+class SqlObject extends SqlTable {
+  const SqlObject(super.schema, super.name, this.type);
+  final String type;
+}
+
 class SqlTable {
   const SqlTable(this.schema, this.name);
   final String schema;
@@ -84,6 +89,75 @@ class SqlManager {
       'ORDER BY ORDINAL_POSITION',
       parameters: {'schema': table.schema, 'table': table.name},
     );
+  }
+
+  Future<List<SqlObject>> objects(ServerProfile server, String database, String password, String kind) async {
+    const types = {'tables': "'U'", 'views': "'V'", 'procedures': "'P','PC'", 'functions': "'FN','IF','TF','FS','FT'"};
+    final typeFilter = types[kind];
+    if (typeFilter == null) throw ArgumentError('Unknown object category');
+    final c = await open(server, database, password);
+    final rows = await c.queryRows(
+      'SELECT s.name AS schema_name, o.name, o.type FROM sys.objects o '
+      'JOIN sys.schemas s ON s.schema_id=o.schema_id '
+      'WHERE o.is_ms_shipped=0 AND o.type IN ($typeFilter) ORDER BY s.name,o.name');
+    return rows.map((r) => SqlObject('${r['schema_name']}', '${r['name']}', '${r['type']}')).toList();
+  }
+
+  Future<List<Map<String, Object?>>> objectDetails(ServerProfile server, String database,
+    String password, SqlObject object, String kind) async {
+    final c = await open(server, database, password);
+    const queries = {
+      'Columns': "SELECT c.name, t.name AS type, c.max_length AS bytes, c.precision, c.scale, "
+        "c.is_nullable AS nullable, c.is_identity AS identity_column, c.is_computed AS computed, dc.definition AS default_value "
+        "FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id "
+        "LEFT JOIN sys.default_constraints dc ON dc.object_id=c.default_object_id "
+        "WHERE c.object_id=OBJECT_ID(@object) ORDER BY c.column_id",
+      'Keys': "SELECT k.name, k.type_desc AS type, c.name AS column_name FROM sys.key_constraints k "
+        "JOIN sys.index_columns ic ON ic.object_id=k.parent_object_id AND ic.index_id=k.unique_index_id "
+        "JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id "
+        "WHERE k.parent_object_id=OBJECT_ID(@object) "
+        "UNION ALL SELECT fk.name, 'FOREIGN_KEY', pc.name + ' -> ' + QUOTENAME(OBJECT_SCHEMA_NAME(fk.referenced_object_id)) + '.' + "
+        "QUOTENAME(OBJECT_NAME(fk.referenced_object_id)) + '.' + QUOTENAME(rc.name) "
+        "FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id "
+        "JOIN sys.columns pc ON pc.object_id=fkc.parent_object_id AND pc.column_id=fkc.parent_column_id "
+        "JOIN sys.columns rc ON rc.object_id=fkc.referenced_object_id AND rc.column_id=fkc.referenced_column_id "
+        "WHERE fk.parent_object_id=OBJECT_ID(@object)",
+      'Indexes': "SELECT i.name, i.type_desc AS type, i.is_unique AS unique_index, c.name AS column_name, "
+        "ic.is_included_column AS included, ic.is_descending_key AS descending_key, i.filter_definition AS filter_definition "
+        "FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id "
+        "JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id "
+        "WHERE i.object_id=OBJECT_ID(@object) AND i.index_id>0 ORDER BY i.index_id,ic.key_ordinal,ic.index_column_id",
+    };
+    final statement = queries[kind];
+    if (statement == null) throw ArgumentError('Unknown detail category');
+    return c.queryRows(statement, parameters: {'object': object.fullName});
+  }
+
+  Future<String> scriptObject(ServerProfile server, String database, String password,
+    SqlObject object, String action) async {
+    final c = await open(server, database, password);
+    if (action == 'definition') {
+      final rows = await c.queryRows('SELECT OBJECT_DEFINITION(OBJECT_ID(@object)) AS definition',
+        parameters: {'object': object.fullName});
+      final definition = rows.firstOrNull?['definition'];
+      if (definition == null) throw StateError('Definition unavailable: encrypted object or VIEW DEFINITION permission required.');
+      return definition.toString();
+    }
+    final rows = await c.queryRows(
+      'SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(@object) '
+      'AND is_identity=0 AND is_computed=0 AND system_type_id<>189 ORDER BY column_id',
+      parameters: {'object': object.fullName});
+    final columns = rows.map((r) => quoteIdentifier('${r['name']}')).toList();
+    switch (action) {
+      case 'INSERT':
+        if (columns.isEmpty) return 'INSERT INTO ${object.fullName} DEFAULT VALUES;';
+        return 'INSERT INTO ${object.fullName} (\n  ${columns.join(',\n  ')}\n)\nVALUES (\n  ${columns.map((c) => 'NULL /* $c */').join(',\n  ')}\n);';
+      case 'UPDATE':
+        if (columns.isEmpty) throw StateError('No writable columns.');
+        return 'UPDATE ${object.fullName}\nSET ${columns.map((c) => '$c = NULL').join(',\n    ')}\nWHERE 1 = 0; -- Replace with your filter';
+      case 'DELETE': return 'DELETE FROM ${object.fullName}\nWHERE 1 = 0; -- Replace with your filter';
+      default: throw ArgumentError('Unknown script action');
+    }
   }
 
   Future<MssqlExecutionResult> query(
