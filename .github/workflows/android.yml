@@ -1,41 +1,131 @@
-name: Android debug APK
+name: OdinSQL Android Release
 
 on:
   push:
     branches: [master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: odinsql-android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  android:
+  build-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
-      - name: Generate Android project files
-        run: flutter create . --platforms=android --project-name=odin_sql --org=com.odin
-      - name: Allow SQL Server TCP connections
+
+      - name: Generate Android project
+        run: flutter create . --platforms=android --project-name=odin_sql --org=com.odin --no-pub
+
+      - name: Add SQL Server network permission and app title
+        shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          path = Path("android/app/src/main/AndroidManifest.xml")
-          contents = path.read_text()
+          path = Path('android/app/src/main/AndroidManifest.xml')
+          source = path.read_text()
           permission = '<uses-permission android:name="android.permission.INTERNET" />'
-          if permission not in contents:
-              contents = contents.replace("<manifest", "<manifest", 1)
-              tag_end = contents.index(">")
-              contents = contents[:tag_end+1] + "\n    " + permission + contents[tag_end+1:]
-              path.write_text(contents)
+          if permission not in source:
+              tag_end = source.index('>')
+              source = source[:tag_end+1] + '\n    ' + permission + source[tag_end+1:]
+          source = source.replace('android:label="odin_sql"', 'android:label="OdinSQL"')
+          path.write_text(source)
           PY
-      - name: Resolve dependencies
+
+      - name: Resolve Flutter packages
         run: flutter pub get
-      - name: Analyze Flutter code
+
+      - name: Apply the approved OdinSQL launcher icon
+        run: dart run flutter_launcher_icons
+
+      - name: Read version from pubspec.yaml
+        id: version
+        shell: bash
+        run: |
+          FULL="$(awk '/^version:/ { print $2 }' pubspec.yaml)"
+          VERSION="${FULL%%+*}"
+          BUILD="${FULL##*+}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! "$BUILD" =~ ^[0-9]+$ ]]; then
+            echo "::error::Expected pubspec version in format 0.2.0+2"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Flutter analyze
         run: flutter analyze --no-fatal-infos
-      - name: Build APK
-        run: flutter build apk --debug
-      - uses: actions/upload-artifact@v4
+
+      # The generated Flutter Android template signs release APKs with a
+      # CI-local debug key unless a persistent keystore is supplied.
+      # Publish this first distribution as a preview (not a stable release).
+      - name: Build optimized APK
+        run: |
+          flutter build apk --release \
+            --build-name "${{ steps.version.outputs.version }}" \
+            --build-number "${{ steps.version.outputs.build }}"
+
+      - name: Prepare APK and checksums
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cp build/app/outputs/flutter-apk/app-release.apk "OdinSQL-v$VERSION.apk"
+          cp "OdinSQL-v$VERSION.apk" "OdinSQL-latest.apk"
+          sha256sum "OdinSQL-v$VERSION.apk" > "OdinSQL-v$VERSION.apk.sha256"
+          sha256sum "OdinSQL-latest.apk" > "OdinSQL-latest.apk.sha256"
+
+      - name: Upload APK to Actions
+        uses: actions/upload-artifact@v4
         with:
-          name: OdinSQL-Android-debug
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          name: OdinSQL-v${{ steps.version.outputs.version }}
+          path: |
+            OdinSQL-v${{ steps.version.outputs.version }}.apk
+            OdinSQL-v${{ steps.version.outputs.version }}.apk.sha256
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish GitHub preview release
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists. Bump pubspec version for a new release."
+            exit 0
+          fi
+          cat > release-notes.md <<EOF
+          OdinSQL $TAG — Android SQL Server mobile management (preview).
+
+          - Direct SQL Server connection, multi-server profiles with photo and color
+          - Object Explorer, SQL editor tabs, query history, result grid, CSV/JSON export
+          - Approved OdinSQL mobile database logo as app launcher icon
+          - Download: OdinSQL-latest.apk or OdinSQL-v$VERSION.apk
+          - SHA256 checksums are included for download verification
+
+          Important: This preview APK uses the CI's temporary Android debug signing
+          identity. Future builds may not install as an update over it and may require
+          uninstalling it (which would remove locally stored profiles and query history).
+          Stable persistent signing must be configured before production distribution.
+          Actual live SQL Server connectivity is not verified by the CI build.
+          EOF
+          gh release create "$TAG" \
+            "OdinSQL-v$VERSION.apk" "OdinSQL-v$VERSION.apk.sha256" \
+            "OdinSQL-latest.apk" "OdinSQL-latest.apk.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "OdinSQL $TAG" --notes-file release-notes.md --prerelease
